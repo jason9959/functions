@@ -1,5 +1,6 @@
 """기업 재무 대시보드: API 연결 전 레이아웃 프로토타입."""
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -28,15 +29,16 @@ def secret(name):
 
 @st.cache_data(ttl=86_400, show_spinner=False)
 def company_catalog(dart_api_key, sec_user_agent):
+    """Load DART and SEC catalogs only when the user explicitly searches."""
     companies, errors = [], []
-    for loader, credential in (
-        (fetch_dart_companies, dart_api_key),
-        (fetch_sec_companies, sec_user_agent),
-    ):
-        try:
-            companies.extend(loader(credential))
-        except DataSourceError as error:
-            errors.append(str(error))
+    jobs=[(fetch_dart_companies,dart_api_key),(fetch_sec_companies,sec_user_agent)]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures={executor.submit(loader,credential):loader for loader,credential in jobs}
+        for future in as_completed(futures):
+            try:
+                companies.extend(future.result())
+            except DataSourceError as error:
+                errors.append(str(error))
     return companies, errors
 
 
@@ -103,20 +105,22 @@ def render_conditions() -> None:
     st.markdown('<div class="intro">기업의 자산, 실적, 현금 흐름을 기간별로 비교합니다.</div>', unsafe_allow_html=True)
     st.info("한국 기업은 DART, 미국 기업은 SEC EDGAR의 공식 공시 데이터를 사용합니다.")
     saved=_saved_defaults()
+
     if st.button("↺ 조건 초기화", key="reset_f08_conditions"):
-        st.session_state.pop("f08_saved",None); st.session_state.pop("f08_result",None); st.rerun()
-    dart_api_key=secret("DART_API_KEY"); sec_user_agent=secret("SEC_USER_AGENT")
-    catalog, errors=company_catalog(dart_api_key,sec_user_agent)
-    if not catalog:
-        st.error("API 설정을 확인해 주세요. 기업 목록을 불러오지 못했습니다.")
-        if errors: st.caption(" / ".join(errors))
-        left,right=st.columns(2)
-        with left:
-            if st.button("뒤로", key="back_f08_no_catalog", use_container_width=True): _goto("feature"); st.rerun()
-        return
+        for key in list(st.session_state.keys()):
+            if key.startswith("f08_w_") or key in {"f08_saved","f08_result","f08_matches","f08_search_query"}:
+                st.session_state.pop(key,None)
+        st.rerun()
+
+    dart_api_key=secret("DART_API_KEY")
+    sec_user_agent=secret("SEC_USER_AGENT")
+    if not dart_api_key and not sec_user_agent:
+        st.warning("Streamlit Secrets에 DART_API_KEY 또는 SEC_USER_AGENT를 설정해 주세요. 화면은 사용할 수 있지만 기업 검색은 실행되지 않습니다.")
+
     query=st.text_input("기업명 또는 종목코드",value=saved.get("query",""),placeholder="예: 삼성전자, 005930, Apple, AAPL",key="f08_w_query")
     c1,c2,c3=st.columns(3)
-    with c1: frequency=st.radio("조회 기준",["연도별","분기별"],index=0 if saved.get("frequency","연도별")=="연도별" else 1,horizontal=True,key="f08_w_frequency")
+    with c1:
+        frequency=st.radio("조회 기준",["연도별","분기별"],index=0 if saved.get("frequency","연도별")=="연도별" else 1,horizontal=True,key="f08_w_frequency")
     quarterly=frequency=="분기별"
     with c2:
         start_year=int(st.number_input("시작 연도",2015,date.today().year,int(saved.get("start_year",date.today().year-3)),key="f08_w_start_year"))
@@ -124,23 +128,57 @@ def render_conditions() -> None:
     with c3:
         end_year=int(st.number_input("종료 연도",2015,date.today().year,int(saved.get("end_year",date.today().year-1)),key="f08_w_end_year"))
         end_quarter=st.selectbox("종료 분기",[1,2,3,4],index=int(saved.get("end_quarter",4))-1,format_func=lambda x:f"{x}분기",key="f08_w_end_q") if quarterly else 4
-    normalized=query.strip().casefold(); matches=search_companies(catalog,normalized) if normalized else []
+
+    normalized=query.strip().casefold()
+    searched_query=st.session_state.get("f08_search_query")
+    matches=st.session_state.get("f08_matches",[]) if normalized and normalized==searched_query else []
     company=None
     if matches:
         company=st.selectbox("검색 결과",matches,format_func=lambda item:item.label,key="f08_w_company")
         st.caption(f"데이터 출처: {company.source}")
-    st.divider(); left,right=st.columns(2)
-    with left: back=st.button("뒤로",key="back_f08_conditions",use_container_width=True)
-    with right: run=st.button("조회 실행",key="run_f08_conditions",type="primary",use_container_width=True)
-    if back: _goto("feature"); st.rerun()
-    if not run: return
-    if (start_year,start_quarter)>(end_year,end_quarter): st.error("시작 기간을 종료 기간 이전으로 설정해 주세요."); return
-    if not normalized: st.error("기업명 또는 종목코드를 입력해 주세요."); return
-    if not company: st.error("일치하는 기업을 찾지 못했습니다."); return
+    else:
+        st.caption("기업 목록은 화면 진입 시 불러오지 않습니다. 조건을 입력한 뒤 아래의 기업 검색 버튼을 눌러 주세요.")
+
+    st.divider()
+    left,right=st.columns(2)
+    with left:
+        back=st.button("뒤로",key="back_f08_conditions",use_container_width=True)
+    with right:
+        action_label="조회 실행" if matches else "기업 검색"
+        run=st.button(action_label,key="run_f08_conditions",type="primary",use_container_width=True)
+
+    if back:
+        _goto("feature"); st.rerun(); return
+    if not run:
+        return
+    if not normalized:
+        st.error("기업명 또는 종목코드를 입력해 주세요."); return
+
+    current_conditions={"query":query,"frequency":frequency,"start_year":start_year,"start_quarter":start_quarter,"end_year":end_year,"end_quarter":end_quarter}
+
+    if not matches:
+        try:
+            with st.spinner("DART·SEC 기업 목록을 검색하고 있습니다..."):
+                catalog,errors=company_catalog(dart_api_key,sec_user_agent)
+            found=search_companies(catalog,normalized) if catalog else []
+            if not found:
+                detail=(" / ".join(errors)) if errors else "일치하는 기업을 찾지 못했습니다."
+                st.error(detail); return
+            st.session_state["f08_matches"]=found
+            st.session_state["f08_search_query"]=normalized
+            st.session_state["f08_saved"]=current_conditions
+            st.rerun(); return
+        except Exception as error:
+            st.error(f"기업 목록을 불러오지 못했습니다: {error}"); return
+
+    if (start_year,start_quarter)>(end_year,end_quarter):
+        st.error("시작 기간을 종료 기간 이전으로 설정해 주세요."); return
+    if not company:
+        st.error("검색 결과에서 기업을 선택해 주세요."); return
     try:
         with st.spinner("공시 데이터를 불러오는 중입니다..."):
             frame,unit=financial_result(company,start_year,start_quarter,end_year,end_quarter,quarterly,dart_api_key,sec_user_agent)
-        st.session_state["f08_saved"]={"query":query,"frequency":frequency,"start_year":start_year,"start_quarter":start_quarter,"end_year":end_year,"end_quarter":end_quarter}
+        st.session_state["f08_saved"]=current_conditions
         st.session_state["f08_result"]={"company":company,"quarterly":quarterly,"frame":frame,"unit":unit}
         _goto("f08_results"); st.rerun()
     except DataSourceError as error:
