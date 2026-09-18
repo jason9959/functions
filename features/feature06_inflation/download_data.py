@@ -21,7 +21,7 @@ def main():
     manifest = []
     frames = {}
     start = int(dt.datetime(2001, 1, 1, tzinfo=dt.timezone.utc).timestamp())
-    end = int((dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).timestamp())
+    end = int(dt.datetime(2026, 9, 10, tzinfo=dt.timezone.utc).timestamp())
     for ticker in TICKERS:
         url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?period1={start}&period2={end}&interval=1d&events=div%2Csplits'
         raw = get(url)
