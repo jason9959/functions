@@ -9,7 +9,9 @@ matplotlib.use('Agg')
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 import pandas as pd
+import requests
 import streamlit as st
+import yfinance as yf
 from .compass import Config, signals, backtest, metrics
 
 ROOT = Path(__file__).resolve().parent
@@ -27,15 +29,59 @@ def go(page):
 def back(page='home',label='기능 선택으로'):
     st.button('← '+label,key='back_'+page,on_click=go,args=(page,))
 
-@st.cache_data
-def load_data(stamp):
-    prices=pd.read_csv(ROOT/'data/prices.csv',index_col=0,parse_dates=True)
-    fred=pd.read_csv(ROOT/'data/T5YIE.csv',index_col=0,parse_dates=True).iloc[:,0]
-    return prices,pd.to_numeric(fred,errors='coerce')
+REQUIRED_ASSETS=['SPY','XLE','XLI','XLF','XLB','XLU','XLV','XLP','XLK','IEF']
+FRED_T5YIE_URL='https://fred.stlouisfed.org/graph/fredgraph.csv?id=T5YIE'
 
-@st.cache_data
-def calculate(start,end,config,stamp):
-    p,f=load_data(stamp)
+@st.cache_data(ttl=60*60*4, show_spinner=False)
+def load_data():
+    """Fetch public inputs lazily. Nothing is downloaded when feature 6 merely opens."""
+    end=(pd.Timestamp.today().normalize()+pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    raw=yf.download(
+        REQUIRED_ASSETS,
+        start='2001-01-01',
+        end=end,
+        auto_adjust=True,
+        progress=False,
+        threads=True,
+        group_by='column',
+    )
+    if raw is None or raw.empty:
+        raise ValueError('Yahoo Finance에서 ETF 가격 데이터를 가져오지 못했습니다.')
+    if isinstance(raw.columns,pd.MultiIndex):
+        level0=raw.columns.get_level_values(0)
+        if 'Close' in level0:
+            prices=raw['Close'].copy()
+        elif 'Adj Close' in level0:
+            prices=raw['Adj Close'].copy()
+        else:
+            raise ValueError('Yahoo Finance 응답에서 종가 데이터를 찾지 못했습니다.')
+    else:
+        raise ValueError('여러 ETF 가격 데이터 형식이 예상과 다릅니다.')
+    prices.index=pd.to_datetime(prices.index).tz_localize(None)
+    prices=prices.sort_index().apply(pd.to_numeric,errors='coerce')
+    missing=[asset for asset in REQUIRED_ASSETS if asset not in prices.columns or prices[asset].dropna().empty]
+    if missing:
+        raise ValueError('가격 데이터가 없는 ETF: '+', '.join(missing))
+    prices=prices[REQUIRED_ASSETS]
+
+    response=requests.get(FRED_T5YIE_URL,headers={'User-Agent':'portfolio-dashboard/1.0'},timeout=20)
+    response.raise_for_status()
+    fred_frame=pd.read_csv(io.BytesIO(response.content))
+    date_col='DATE' if 'DATE' in fred_frame.columns else fred_frame.columns[0]
+    value_cols=[c for c in fred_frame.columns if c != date_col]
+    if not value_cols:
+        raise ValueError('FRED T5YIE 데이터 형식이 예상과 다릅니다.')
+    fred_frame[date_col]=pd.to_datetime(fred_frame[date_col],errors='coerce')
+    fred=pd.to_numeric(fred_frame[value_cols[0]],errors='coerce')
+    fred.index=fred_frame[date_col]
+    fred=fred.dropna().sort_index()
+    if fred.empty:
+        raise ValueError('FRED에서 T5YIE 데이터를 가져오지 못했습니다.')
+    return prices,fred
+
+@st.cache_data(ttl=60*60*4, show_spinner=False)
+def calculate(start,end,config):
+    p,f=load_data()
     s=signals(p,f,config)
     nav,spy,events,regimes=backtest(p,s,start,end,config)
     return nav,spy,events,regimes,s
@@ -139,29 +185,10 @@ def monthly_decisions(sig, events):
 
 
 def render(page: str) -> None:
-    if not (ROOT/'data/prices.csv').exists() or not (ROOT/'data/T5YIE.csv').exists():
-        try:
-            from .download_data import main as download_public_data
-            with st.spinner('인플레이션 나침반용 공개 데이터를 준비하고 있습니다...'):
-                download_public_data()
-        except Exception as error:
-            st.error(f'공개 데이터를 준비하지 못했습니다: {error}')
-            return
-
-    stamp=((ROOT/'data/prices.csv').stat().st_mtime,(ROOT/'data/T5YIE.csv').stat().st_mtime)
-    try:
-        prices,fred=load_data(stamp)
-    except Exception as error:
-        st.error(f'데이터를 읽을 수 없습니다. download_data.py로 데이터를 다시 받아주세요. 상세: {error}')
-        st.stop()
-
     calendar_previous_month_end=pd.Timestamp.today().normalize().replace(day=1)-pd.Timedelta(days=1)
-    default_end=min(calendar_previous_month_end,prices.index[-1].normalize())
-    # Require a common history across every ETF used by the signal and portfolio.
-    required_assets=['SPY','XLE','XLI','XLF','XLB','XLU','XLV','XLP','XLK','IEF']
-    asset_first_dates={asset:prices[asset].dropna().index.min() for asset in required_assets}
-    common_start=max(asset_first_dates.values()).normalize()
-    default_start=max(common_start,default_end-pd.DateOffset(years=10))
+    default_end=calendar_previous_month_end
+    default_start=default_end-pd.DateOffset(years=10)
+    earliest_input=pd.Timestamp('2003-01-01')
 
     local_page=page.removeprefix('f06_')
     if local_page=='home':
@@ -173,7 +200,7 @@ def render(page: str) -> None:
             ('conditions','📈','전략 백테스트','분석 기간과 거래 조건을 정하고 S&P 500과 비교합니다.'),
             ('audit','🔎','검증 결과 살펴보기','거래 지연, 비용, 신호 구성에 따라 성과가 어떻게 달라지는지 확인합니다.')]:
             st.button(f'{icon} **{title}**  \n{desc}',key='f06_menu_'+key,width='stretch',on_click=go,args=(key,))
-        st.caption(f'저장된 ETF 데이터: {prices.index[0]:%Y.%m.%d} – {prices.index[-1]:%Y.%m.%d} · USD · 배당·분할 조정 가격')
+        st.caption('시장·기대인플레이션 데이터는 백테스트 실행 시 불러오며 4시간 동안 캐시합니다.')
 
     elif local_page=='rules':
         back()
@@ -193,15 +220,14 @@ def render(page: str) -> None:
         st.button('백테스트 조건 설정',key='f06_run_rules',on_click=go,args=('conditions',))
 
     elif local_page=='conditions':
-        back()
         st.title('📈 전략 백테스트')
         st.markdown('<p class="step-caption">1. 분석 조건을 정한 뒤 결과를 확인하세요.</p>',unsafe_allow_html=True)
         saved=st.session_state.setdefault('f06_saved', {})
         with st.form('conditions'):
             c1,c2=st.columns(2)
-            start=c1.date_input('분석 시작일',value=max(saved.get('start',default_start.date()),default_start.date()),min_value=common_start.date(),max_value=prices.index[-1].date())
-            end=c2.date_input('분석 종료일',value=saved.get('end',default_end.date()),min_value=pd.Timestamp('2003-01-01').date(),max_value=prices.index[-1].date())
-            st.caption(f'모든 필수 ETF의 공통 데이터 시작일: {common_start:%Y.%m.%d}')
+            start=c1.date_input('분석 시작일',value=saved.get('start',default_start.date()),min_value=earliest_input.date(),max_value=default_end.date())
+            end=c2.date_input('분석 종료일',value=saved.get('end',default_end.date()),min_value=earliest_input.date(),max_value=default_end.date())
+            st.caption('실제 공통 데이터 시작일은 테스트 실행 시 확인합니다. 데이터는 실행할 때만 네트워크에서 불러옵니다.')
             preset=st.selectbox('거래 가정',list(PRESETS),index=list(PRESETS).index(saved.get('preset','원문 재현 가정')))
             st.caption('보수적 검증: FRED 입력 하루 지연 + 다음 거래일 종가 체결 + 완전 교체당 비용 10bp. 원문 재현 가정: 당일 종가 신호·체결, 비용 0.')
             initial=st.number_input('시작 금액 (USD)',min_value=100.0,value=saved.get('initial',10000.0),step=1000.0)
@@ -215,7 +241,14 @@ def render(page: str) -> None:
                 lag=a.selectbox('FRED 입력 지연 (거래일)',[0,1,2],index=saved.get('lag',1))
                 execution=b.selectbox('신호 후 체결 지연 (거래일)',[0,1,2],index=saved.get('execution',1))
                 cost=a.number_input('완전 교체당 비용 (bp)',min_value=0.0,max_value=100.0,value=saved.get('cost',10.0),step=5.0)
-            submitted=st.form_submit_button('결과 보기',type='primary',width='stretch')
+            st.divider()
+            left_action,right_action=st.columns(2)
+            with left_action:
+                go_back=st.form_submit_button('뒤로',width='stretch')
+            with right_action:
+                submitted=st.form_submit_button('테스트 실행',type='primary',width='stretch')
+        if go_back:
+            go('home'); st.rerun(); return
         if submitted:
             if start>=end:
                 st.error('종료일을 시작일보다 뒤로 설정해 주세요.')
@@ -225,7 +258,15 @@ def render(page: str) -> None:
                 config=replace(config,threshold=threshold,growth_window=growth,breakeven_window=be,asset_window=asset)
                 try:
                     with st.spinner('월말 신호와 일별 수익률을 계산하고 있습니다…'):
-                        result=calculate(str(start),str(end),config,stamp)
+                        prices,fred=load_data()
+                        asset_first_dates={asset:prices[asset].dropna().index.min() for asset in REQUIRED_ASSETS}
+                        common_start=max(asset_first_dates.values()).normalize()
+                        available_end=min(prices.index.max().normalize(),fred.index.max().normalize())
+                        if pd.Timestamp(start) < common_start:
+                            raise ValueError(f'모든 필수 ETF의 공통 데이터는 {common_start:%Y-%m-%d}부터 사용할 수 있습니다. 시작일을 늦춰주세요.')
+                        if pd.Timestamp(end) > available_end:
+                            end=available_end.date()
+                        result=calculate(str(start),str(end),config)
                         if len(result[0])<22: raise ValueError('실제 투자 기간이 한 달 이상 되도록 기간을 늘려주세요.')
                     st.session_state['f06_saved']=dict(start=start,end=end,preset=preset,initial=initial,threshold=threshold,growth=growth,be=be,asset=asset,lag=lag,execution=execution,cost=cost)
                     st.session_state['f06_result']=result
@@ -235,7 +276,8 @@ def render(page: str) -> None:
                     st.error(f'계산을 완료하지 못했습니다. 기간 또는 데이터 상태를 확인해 주세요. 상세: {error}')
 
     elif local_page=='results':
-        back('conditions','조건 수정하기')
+        if 'f06_result' not in st.session_state or 'f06_config' not in st.session_state:
+            go('conditions'); st.rerun(); return
         st.title('📈 전략 백테스트 결과')
         nav,spy,events,regimes,sig=st.session_state['f06_result']
         cfg=st.session_state['f06_config']
@@ -338,9 +380,15 @@ def render(page: str) -> None:
             z.writestr('signals.csv',sig.loc[:nav.index[-1]].to_csv())
             z.writestr('config.json',json.dumps({'config':cfg.__dict__,'requested':{k:str(v) for k,v in st.session_state.setdefault('f06_saved', {}).items()}},ensure_ascii=False,indent=2))
         report_png=result_report_image(nav,spy,initial,events)
-        save_col,csv_col=st.columns(2)
-        save_col.download_button('결과 저장',report_png,'inflation-compass-result.png','image/png',width='stretch')
-        csv_col.download_button('CSV 묶음',buf.getvalue(),'inflation-compass-results.zip','application/zip',width='stretch')
+        with st.expander('원본 결과 파일'):
+            st.download_button('CSV 묶음 다운로드',buf.getvalue(),'inflation-compass-results.zip','application/zip',width='stretch')
+        st.divider()
+        back_col,save_col=st.columns(2)
+        with back_col:
+            if st.button('조건으로 돌아가기',key='back_f06_results',width='stretch'):
+                go('conditions'); st.rerun()
+        with save_col:
+            st.download_button('결과 저장',report_png,'inflation-compass-result.png','image/png',key='download_f06_result',width='stretch')
 
     elif local_page=='audit':
         back()
