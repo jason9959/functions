@@ -13,11 +13,16 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-from features.feature06_inflation import page as feature06
-from features.feature07_dollar import page as feature07
-from features.feature08_financial import page as feature08
-from features.feature09_moving_average import page as feature09
-from features.feature10_laoer import page as feature10
+from features.feature01_comparison import page as feature01
+from features.feature02_periodic_returns import page as feature02
+from features.feature03_portfolio import page as feature03
+from features.feature04_monte_carlo_normal import page as feature04
+from features.feature05_monte_carlo_bootstrap import page as feature05
+from features.feature07_inflation import page as feature07
+from features.feature08_dollar import page as feature08
+from features.feature09_financial import page as feature09
+from features.feature10_moving_average import page as feature10
+from features.feature11_laoer import page as feature11
 
 
 st.set_page_config(
@@ -31,13 +36,14 @@ FEATURES = [
     {"id":"return_comparison","icon":"📈","title":"1. 상대 수익률 비교","description":"여러 종목을 같은 기준값 100으로 비교합니다."},
     {"id":"periodic_returns","icon":"🗓️","title":"2. 주기별 수익률 분석","description":"과거 수익률의 분포와 주기별 흐름을 확인합니다."},
     {"id":"portfolio_backtest","icon":"💼","title":"3. 포트폴리오 백테스트","description":"자산 비중과 리밸런싱 전략을 과거 데이터로 확인합니다."},
-    {"id":"monte_carlo_normal","icon":"🎲","title":"4. 정규분포 몬테카를로","description":"과거 수익률의 평균과 변동성으로 미래 주가를 만듭니다."},
-    {"id":"monte_carlo_bootstrap","icon":"🧩","title":"5. Bootstrap 몬테카를로","description":"실제 과거 수익률을 다시 뽑아 미래 주가를 만듭니다."},
-    {"id":"inflation_compass","icon":"🧭","title":"6. 인플레이션 나침반","description":"성장과 기대인플레이션 국면에 따른 자산 전략을 검증합니다."},
-    {"id":"dollar_compass","icon":"💵","title":"7. 달러 환율 나침반","description":"환율·달러지수 조건과 원화/달러 스위칭 전략을 분석합니다."},
-    {"id":"financial_dashboard","icon":"🏢","title":"8. 기업 재무 대시보드","description":"DART·SEC 공식 공시로 기업 재무상태·손익·현금흐름을 확인합니다."},
-    {"id":"moving_average","icon":"📊","title":"9. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
-    {"id":"laoer_infinite","icon":"♾️","title":"10. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
+    {"id":"allocation_sweep","icon":"⚖️","title":"4. 비율별 리밸런싱 분석","description":"종목 비율을 바꿔가며 포트폴리오 성과를 비교합니다."},
+    {"id":"monte_carlo_normal","icon":"🎲","title":"5. 정규분포 몬테카를로","description":"과거 수익률의 평균과 변동성으로 미래 주가를 만듭니다."},
+    {"id":"monte_carlo_bootstrap","icon":"🧩","title":"6. Bootstrap 몬테카를로","description":"실제 과거 수익률을 다시 뽑아 미래 주가를 만듭니다."},
+    {"id":"inflation_compass","icon":"🧭","title":"7. 인플레이션 나침반","description":"성장과 기대인플레이션 국면에 따른 자산 전략을 검증합니다."},
+    {"id":"dollar_compass","icon":"💵","title":"8. 달러 환율 나침반","description":"환율·달러지수 조건과 원화/달러 스위칭 전략을 분석합니다."},
+    {"id":"financial_dashboard","icon":"🏢","title":"9. 기업 재무 대시보드","description":"DART·SEC 공식 공시로 기업 재무상태·손익·현금흐름을 확인합니다."},
+    {"id":"moving_average","icon":"📊","title":"10. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
+    {"id":"laoer_infinite","icon":"♾️","title":"11. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
 ]
 
 
@@ -66,6 +72,7 @@ for key, default in {
     "comparison_result": None,
     "periodic_result": None,
     "portfolio_result": None,
+    "allocation_result": None,
     "monte_normal_result": None,
     "monte_bootstrap_result": None,
     "modal_error": None,
@@ -100,6 +107,11 @@ CONDITION_STATE_KEYS = {
         "portfolio_contribution_frequency",
         *[f"portfolio_ticker_{index}" for index in range(5)],
         *[f"portfolio_weight_{index}" for index in range(5)],
+    ],
+    "allocation": [
+        "allocation_start", "allocation_end", "allocation_count", "allocation_step",
+        "allocation_ticker_1", "allocation_ticker_2", "allocation_ticker_3",
+        "allocation_use_fixed", "allocation_fixed_index", "allocation_fixed_ratio",
     ],
     "normal": [
         "mc_normal_ticker",
@@ -147,6 +159,7 @@ RESULT_STATE_KEYS = {
     "comparison": "comparison_result",
     "periodic": "periodic_result",
     "portfolio": "portfolio_result",
+    "allocation": "allocation_result",
     "normal": "monte_normal_result",
     "bootstrap": "monte_bootstrap_result",
 }
@@ -443,6 +456,16 @@ def condition_default_values() -> dict[str, object]:
         "portfolio_rebalance": "매일",
         "portfolio_contribution": 1000.0,
         "portfolio_contribution_frequency": "매월",
+        "allocation_start": today - datetime.timedelta(days=365 * 3),
+        "allocation_end": today,
+        "allocation_count": "2개",
+        "allocation_step": "10%",
+        "allocation_ticker_1": "QQQ",
+        "allocation_ticker_2": "IAU",
+        "allocation_ticker_3": "SPY",
+        "allocation_use_fixed": False,
+        "allocation_fixed_index": "1번 종목",
+        "allocation_fixed_ratio": 25.0,
     }
     defaults.update({f"comparison_ticker_{index}": "" for index in range(1, 11)})
     defaults.update({f"portfolio_ticker_{index}": "" for index in range(5)})
@@ -1093,6 +1116,7 @@ def render_feature_page() -> None:
                 "return_comparison": "return_comparison_conditions",
                 "periodic_returns": "periodic_conditions",
                 "portfolio_backtest": "portfolio_conditions",
+                "allocation_sweep": "allocation_conditions",
                 "monte_carlo_normal": "monte_normal_conditions",
                 "monte_carlo_bootstrap": "monte_bootstrap_conditions",
                 "inflation_compass": "f06_home",
@@ -1455,6 +1479,130 @@ def render_periodic_return_results() -> None:
             key="download_periodic_report",
             use_container_width=True,
         )
+
+
+def _allocation_combinations(tickers: list[str], step: int, fixed_index: int | None = None, fixed_ratio: int | None = None) -> list[tuple[int, ...]]:
+    """합계 100%가 되는 비율 조합을 생성한다."""
+    units = 100 // step
+    combos = []
+    if fixed_index is None:
+        if len(tickers) == 2:
+            combos = [(first * step, 100 - first * step) for first in range(units + 1)]
+        else:
+            for first in range(units + 1):
+                for second in range(units - first + 1):
+                    combos.append((first * step, second * step, 100 - (first + second) * step))
+    else:
+        remaining = 100 - fixed_ratio
+        for value in range(0, remaining + 1, step):
+            weights = [None] * len(tickers)
+            weights[fixed_index] = fixed_ratio
+            other = [index for index in range(len(tickers)) if index != fixed_index]
+            weights[other[0]] = value
+            weights[other[1]] = remaining - value
+            combos.append(tuple(weights))
+    return combos
+
+
+def render_allocation_conditions() -> None:
+    st.title("⚖️ 비율별 리밸런싱 분석")
+    st.markdown("<p class='step-caption'>종목 비율을 바꿔가며 같은 기간의 리밸런싱 성과를 비교합니다.</p>", unsafe_allow_html=True)
+    render_condition_reset_button("allocation")
+    today = datetime.date.today()
+    start_col, end_col = st.columns(2)
+    with start_col:
+        start_date = st.date_input("시작일", min_value=EARLIEST_ANALYSIS_DATE, max_value=today, key="allocation_start")
+    with end_col:
+        end_date = st.date_input("종료일", min_value=EARLIEST_ANALYSIS_DATE, max_value=today, key="allocation_end")
+
+    count_col, step_col = st.columns(2)
+    with count_col:
+        count = st.selectbox("종목 수", ["2개", "3개"], key="allocation_count")
+    with step_col:
+        use_fixed = count == "3개" and st.session_state.get("allocation_use_fixed", False)
+        step_label = st.selectbox("변화 비율", ["5%", "10%", "20%"], key="allocation_step", disabled=use_fixed)
+    use_fixed = False
+    if count == "3개":
+        use_fixed = st.checkbox("고정 비율 사용", key="allocation_use_fixed")
+        fixed_col, ratio_col = st.columns(2)
+        with fixed_col:
+            fixed_index_label = st.selectbox("고정 종목 번호", ["1번 종목", "2번 종목", "3번 종목"], key="allocation_fixed_index", disabled=not use_fixed)
+        with ratio_col:
+            fixed_ratio = st.number_input("고정 비율 (%)", min_value=0.0, max_value=100.0, step=5.0, key="allocation_fixed_ratio", disabled=not use_fixed)
+    else:
+        fixed_index_label, fixed_ratio = "1번 종목", 0.0
+
+    tickers = []
+    for index in range(1, 4 if count == "3개" else 3):
+        if index == 3 and count != "3개":
+            break
+        tickers.append(resolve_ticker(st.text_input(f"종목 {index}", key=f"allocation_ticker_{index}") or ""))
+
+    back_col, result_col = st.columns(2)
+    with back_col:
+        go_back = st.button("뒤로", key="back_to_feature_allocation", use_container_width=True)
+    with result_col:
+        run = st.button("결과 보기", type="primary", key="run_allocation", use_container_width=True)
+    if go_back:
+        st.session_state["current_page"] = "feature"
+        st.rerun()
+    if not run:
+        return
+    if start_date >= end_date:
+        show_error_modal("시작일은 종료일보다 앞서야 합니다.")
+        return
+    if any(ticker is None for ticker in tickers) or len(set(tickers)) != len(tickers):
+        show_error_modal("서로 다른 종목을 입력해주세요.")
+        return
+    step = 5 if use_fixed else int(step_label.rstrip("%"))
+    fixed_index = ["1번 종목", "2번 종목", "3번 종목"].index(fixed_index_label) if use_fixed else None
+    if use_fixed and int(fixed_ratio) % 5 != 0:
+        show_error_modal("고정 비율은 5% 단위로 입력해주세요.")
+        return
+    combos = _allocation_combinations(tickers, step, fixed_index, int(fixed_ratio) if use_fixed else None)
+    loading = render_loading_overlay(f"{len(combos)}개 비율 조합을 계산하는 중이에요...")
+    try:
+        prices, common_start, common_end = prepare_common_price_data(tickers, start_date, end_date)
+        rows = []
+        for weights in combos:
+            calculation = calculate_rebalanced_portfolio(prices, np.array(weights, dtype=float) / 100, 10000.0, "매일")
+            final_value = float(calculation["values"].iloc[-1])
+            rows.append({**{f"{ticker} 비율": weight for ticker, weight in zip(tickers, weights)}, "최종 금액": final_value, "수익률": (final_value / 10000 - 1) * 100, "최대낙폭": float(calculation["drawdown"].min() * 100)})
+        st.session_state["allocation_result"] = {"tickers": tickers, "rows": pd.DataFrame(rows), "common_start": common_start, "common_end": common_end, "step": step}
+        st.session_state["current_page"] = "allocation_results"
+        st.rerun()
+    except Exception as error:
+        show_error_modal(f"비율별 백테스트를 계산하지 못했습니다: {error}")
+    finally:
+        loading.empty()
+
+
+def render_allocation_results() -> None:
+    result = st.session_state.get("allocation_result")
+    if not result:
+        st.session_state["current_page"] = "allocation_conditions"
+        st.rerun()
+    st.title("⚖️ 비율별 리밸런싱 분석 결과")
+    st.caption(f"공통 분석 기간: {result['common_start']:%Y-%m-%d} ~ {result['common_end']:%Y-%m-%d} · {len(result['rows'])}개 조합")
+    rows = result["rows"]
+    if len(result["tickers"]) == 2:
+        figure, axis = plt.subplots(figsize=(12, 5.5))
+        axis.plot(rows[f"{result['tickers'][0]} 비율"], rows["수익률"], marker="o", color="#3182F6")
+        axis.set_xlabel(f"{result['tickers'][0]} 비율 (%)")
+        axis.set_ylabel("수익률 (%)")
+        axis.grid(alpha=0.2)
+        st.pyplot(figure)
+        plt.close(figure)
+    else:
+        st.info("3종목 결과는 비율 조합별 성과표로 확인할 수 있습니다.")
+    st.dataframe(rows.style.format({"최종 금액": "{:,.0f}", "수익률": "{:+.2f}%", "최대낙폭": "{:.2f}%"}), width="stretch", hide_index=True)
+    left, right = st.columns(2)
+    with left:
+        if st.button("조건 입력", key="back_to_allocation_conditions", use_container_width=True):
+            st.session_state["current_page"] = "allocation_conditions"
+            st.rerun()
+    with right:
+        st.download_button("결과 저장", rows.to_csv(index=False).encode("utf-8-sig"), "allocation-sweep.csv", "text/csv", key="download_allocation", use_container_width=True)
 
 
 def render_portfolio_conditions() -> None:
@@ -1840,36 +1988,39 @@ page = st.session_state["current_page"]
 with page_slot.container():
     if page == "feature":
         render_feature_page()
-    elif page == "return_comparison_conditions":
-        render_return_comparison_conditions()
-    elif page == "return_comparison_results":
-        render_return_comparison_results()
-    elif page == "periodic_conditions":
-        render_periodic_return_conditions()
-    elif page == "periodic_results":
-        render_periodic_return_results()
-    elif page == "portfolio_conditions":
-        render_portfolio_conditions()
-    elif page == "portfolio_results":
-        render_portfolio_results()
-    elif page == "monte_normal_conditions":
-        render_monte_carlo_conditions("normal")
-    elif page == "monte_normal_results":
-        render_monte_carlo_results("normal")
-    elif page == "monte_bootstrap_conditions":
-        render_monte_carlo_conditions("bootstrap")
-    elif page == "monte_bootstrap_results":
-        render_monte_carlo_results("bootstrap")
+    elif page.startswith("return_comparison_"):
+        feature01.render(page, render_return_comparison_conditions, render_return_comparison_results)
+    elif page.startswith("periodic_"):
+        feature02.render(page, render_periodic_return_conditions, render_periodic_return_results)
+    elif page.startswith("portfolio_"):
+        feature03.render(page, render_portfolio_conditions, render_portfolio_results)
+    elif page.startswith("allocation_"):
+        if page == "allocation_conditions":
+            render_allocation_conditions()
+        else:
+            render_allocation_results()
+    elif page.startswith("monte_normal_"):
+        feature04.render(
+            page,
+            lambda: render_monte_carlo_conditions("normal"),
+            lambda: render_monte_carlo_results("normal"),
+        )
+    elif page.startswith("monte_bootstrap_"):
+        feature05.render(
+            page,
+            lambda: render_monte_carlo_conditions("bootstrap"),
+            lambda: render_monte_carlo_results("bootstrap"),
+        )
     elif page.startswith("f06_"):
-        feature06.render(page)
-    elif page.startswith("f07_"):
         feature07.render(page)
-    elif page.startswith("f08_"):
+    elif page.startswith("f07_"):
         feature08.render(page)
-    elif page.startswith("f09_"):
+    elif page.startswith("f08_"):
         feature09.render(page)
-    elif page.startswith("f10_"):
+    elif page.startswith("f09_"):
         feature10.render(page)
+    elif page.startswith("f10_"):
+        feature11.render(page)
     else:
         st.session_state["current_page"] = "feature"
         st.rerun()
