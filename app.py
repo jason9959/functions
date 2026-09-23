@@ -23,6 +23,7 @@ from features.feature08_dollar import page as feature08
 from features.feature09_financial import page as feature09
 from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
+from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 
 
 st.set_page_config(
@@ -1047,6 +1048,16 @@ def build_portfolio_report_image(result: dict) -> bytes:
     final_value = float(values.iloc[-1])
     final_invested = float(invested.iloc[-1])
     total_return = (final_value / final_invested - 1) * 100 if final_invested else 0
+    daily_returns = values.pct_change().dropna()
+    sharpe = sharpe_ratio(daily_returns)
+    sortino = sortino_ratio(daily_returns)
+    calmar = calmar_ratio(values)
+    events = result.get("calculation", {}).get("events") if isinstance(result.get("calculation"), dict) else None
+    xirr_value = float("nan")
+    if events is not None and not events.empty and "amount" in events:
+        flows = events.loc[events["amount"] > 0, "amount"]
+        dates = events.loc[events["amount"] > 0, "date"]
+        xirr_value = cashflow_xirr(dates, flows, final_value, float(result.get("initial_investment", final_invested)))
     figure.text(0.08, 0.94, "PORTFOLIO BACKTEST REPORT", fontsize=22, fontweight="bold", color="#191F28")
     figure.text(
         0.08,
@@ -1514,7 +1525,8 @@ def _allocation_metrics(calculation: dict) -> dict[str, float]:
     years = max((values.index[-1] - values.index[0]).days / 365.2425, 1 / 365.2425)
     cagr = ((values.iloc[-1] / values.iloc[0]) ** (1 / years) - 1) * 100
     volatility = daily.std(ddof=1) * np.sqrt(252) * 100 if len(daily) > 1 else 0.0
-    sharpe = (daily.mean() / daily.std(ddof=1) * np.sqrt(252)) if len(daily) > 1 and daily.std(ddof=1) else 0.0
+    sharpe = sharpe_ratio(daily)
+    sortino = sortino_ratio(daily)
     drawdown = values / values.cummax() - 1
     mdd = float(drawdown.min() * 100)
     trough = drawdown.idxmin()
@@ -1527,13 +1539,15 @@ def _allocation_metrics(calculation: dict) -> dict[str, float]:
         "변동성": float(volatility),
         "최대낙폭": mdd,
         "샤프지수": float(sharpe),
+        "Sortino": float(sortino),
+        "Calmar": float((cagr / 100) / abs(mdd / 100)) if mdd < 0 else np.nan,
         "회복기간(일)": recovery_days,
     }
 
 
 def _allocation_best_rows(rows: pd.DataFrame) -> list[tuple[str, pd.Series, str]]:
     """최종 금액을 제외하고 지표별 최고 조합을 반환한다. 낮을수록 좋은 지표는 별도 처리한다."""
-    rules = [("총수익률", "max", "+.2f"), ("CAGR", "max", "+.2f"), ("변동성", "min", ".2f"), ("최대낙폭", "max", ".2f"), ("샤프지수", "max", ".3f"), ("회복기간(일)", "min", ".0f")]
+    rules = [("총수익률", "max", "+.2f"), ("CAGR", "max", "+.2f"), ("변동성", "min", ".2f"), ("최대낙폭", "max", ".2f"), ("샤프지수", "max", ".3f"), ("Sortino", "max", ".3f"), ("Calmar", "max", ".3f"), ("회복기간(일)", "min", ".0f")]
     best = []
     for metric, rule, fmt in rules:
         candidates = rows[metric].dropna()
@@ -1646,10 +1660,10 @@ def render_allocation_results() -> None:
     for index, (metric, best, fmt) in enumerate(best_rows):
         ratio_text = " / ".join(f"{column.replace(' 비율', '')} {int(best[column])}%" for column in rows.columns if column.endswith(" 비율"))
         value = best[metric]
-        suffix = "일" if metric == "회복기간(일)" else ("" if metric == "샤프지수" else "%")
+        suffix = "일" if metric == "회복기간(일)" else ("" if metric in {"샤프지수", "Sortino", "Calmar"} else "%")
         display_value = "회복 불가" if pd.isna(value) else f"{format(value, fmt)}{suffix}"
         metric_cols[index % len(metric_cols)].metric(metric, display_value, ratio_text)
-    table_format = {"최종 금액": "{:,.0f}", "총수익률": "{:+.2f}%", "CAGR": "{:+.2f}%", "변동성": "{:.2f}%", "최대낙폭": "{:.2f}%", "샤프지수": "{:.3f}", "회복기간(일)": "{:.0f}"}
+    table_format = {"최종 금액": "{:,.0f}", "총수익률": "{:+.2f}%", "CAGR": "{:+.2f}%", "변동성": "{:.2f}%", "최대낙폭": "{:.2f}%", "샤프지수": "{:.3f}", "Sortino": "{:.3f}", "Calmar": "{:.3f}", "회복기간(일)": "{:.0f}"}
     st.dataframe(rows.style.format(table_format, na_rep="-"), width="stretch", hide_index=True)
     left, right = st.columns(2)
     with left:
@@ -1778,6 +1792,9 @@ def render_portfolio_conditions() -> None:
             "common_end": common_end,
             "rebalance_frequency": rebalance_frequency,
             "investment_type": investment_type,
+            "initial_investment": float(initial_investment),
+            "contribution_amount": float(contribution_amount),
+            "contribution_frequency": contribution_frequency,
         }
         st.session_state["current_page"] = "portfolio_results"
         st.rerun()
@@ -1818,6 +1835,12 @@ def render_portfolio_results() -> None:
     metric_cols[1].metric("총 투입금", f"{final_invested:,.0f}")
     metric_cols[2].metric("총 수익률", f"{total_return:+.2f}%")
     metric_cols[3].metric("최대 낙폭", f"{float(result['drawdown'].min() * 100):.2f}%")
+    risk_cols = st.columns(4)
+    risk_cols[0].metric("샤프지수", f"{sharpe:.2f}")
+    risk_cols[1].metric("Sortino", f"{sortino:.2f}", help="하락 변동성 대비 수익")
+    risk_cols[2].metric("Calmar", f"{calmar:.2f}", help="MDD 대비 CAGR")
+    if result.get("contribution_amount", 0) > 0:
+        risk_cols[3].metric("적립식 XIRR", f"{xirr_value * 100:.2f}%", help="실제 현금투입 기준 수익률")
 
     st.subheader("낙폭 추이")
     drawdown_figure, drawdown_axis = plt.subplots(figsize=(12, 3.8))
@@ -1996,6 +2019,22 @@ def render_monte_carlo_results(method: str) -> None:
     metric_cols[1].metric("하위 5%", f"{final_p5:,.0f}")
     metric_cols[2].metric("중위값", f"{final_median:,.0f}")
     metric_cols[3].metric("상위 5%", f"{final_p95:,.0f}")
+
+    st.subheader("위험·현금흐름 지표")
+    metric_rows = []
+    sim_dates = pd.date_range(result["historical_end"], periods=percentile_paths.shape[1], freq="B")
+    contribution_steps = set()
+    if result["contribution_amount"]:
+        interval = {"매월": 21, "매분기": 63, "매년": 252}.get(result["contribution_frequency"], 21)
+        contribution_steps = set(range(interval, percentile_paths.shape[1], interval))
+    for label, path in zip(("P5", "P50", "P95"), percentile_paths):
+        row = {"분위": label, "샤프지수": sharpe_ratio(pd.Series(path).pct_change().dropna()), "Sortino": sortino_ratio(pd.Series(path).pct_change().dropna()), "Calmar": calmar_ratio(path)}
+        if result["contribution_amount"]:
+            dates = [sim_dates[i] for i in sorted(contribution_steps)]
+            amounts = [result["contribution_amount"]] * len(dates)
+            row["적립식 XIRR"] = cashflow_xirr(dates, amounts, float(path[-1]), result["initial_investment"])
+        metric_rows.append(row)
+    st.dataframe(pd.DataFrame(metric_rows).style.format({"샤프지수":"{:.2f}", "Sortino":"{:.2f}", "Calmar":"{:.2f}", "적립식 XIRR":"{:.2%}"}, na_rep="-"), hide_index=True, width="stretch")
 
     histogram, histogram_axis = plt.subplots(figsize=(12, 4))
     histogram_axis.hist(result["final_values"], bins=60, alpha=0.82)
