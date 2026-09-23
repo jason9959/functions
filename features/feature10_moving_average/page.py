@@ -270,6 +270,12 @@ def show_result_page() -> None:
     c6.metric(f"{ticker} 최종", money(metrics["buy_hold_final_value"]))
     c7.metric("매수 전환", f"{metrics['buy_count']}회")
     c8.metric("매도 전환", f"{metrics['sell_count']}회")
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("샤프지수", f"{metrics['sharpe']:.2f}")
+    c10.metric("Sortino", f"{metrics['sortino']:.2f}", help="하락 변동성 대비 수익")
+    c11.metric("Calmar", f"{metrics['calmar']:.2f}", help="MDD 대비 CAGR")
+    if context["use_contribution"]:
+        c12.metric("적립식 XIRR", f"{metrics['xirr'] * 100:.2f}%", help="실제 현금투입 기준 수익률")
 
     st.caption(
         f"실제 첫 거래일: {metrics['effective_start_date']} · 종료 포지션: {metrics['ending_position']} · "

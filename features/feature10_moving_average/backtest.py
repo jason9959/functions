@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .schedule import build_contribution_schedule
+from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 
 
 @dataclass
@@ -340,6 +341,10 @@ def run_backtest(
         "profit": profit,
         "return_pct": (profit / total_contributions * 100.0) if total_contributions else np.nan,
         "mdd_pct": _max_drawdown(daily["portfolio_value"]) * 100.0,
+        "sharpe": sharpe_ratio(daily["portfolio_value"].pct_change().dropna()),
+        "sortino": sortino_ratio(daily["portfolio_value"].pct_change().dropna()),
+        "calmar": calmar_ratio(daily["portfolio_value"]),
+        "xirr": cashflow_xirr(daily.index, daily["contribution"], final_value, initial_amount),
         "buy_hold_final_value": final_bh_value,
         "buy_hold_return_pct": (
             (final_bh_value - total_contributions) / total_contributions * 100.0
