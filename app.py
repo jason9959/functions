@@ -720,6 +720,9 @@ def calculate_periodic_summary(result: dict) -> dict[str, float]:
         "annualized_return": float(annualized_return),
         "annualized_volatility": float(annualized_volatility),
         "max_drawdown": float(drawdown.min() * 100),
+        "sharpe": float(sharpe_ratio(daily_returns)),
+        "sortino": float(sortino_ratio(daily_returns)),
+        "calmar": float(calmar_ratio(indexed)),
         "positive_probability": float((period_values > 0).mean() * 100),
         "nonpositive_probability": float((period_values <= 0).mean() * 100),
         "average_period_return": float(period_values.mean()),
@@ -1274,6 +1277,19 @@ def render_return_comparison_results() -> None:
             f"{final_value - 100:+.2f}%",
         )
 
+    st.subheader("위험·수익 지표")
+    risk_rows = []
+    for ticker in result["tickers"]:
+        series = prices[ticker].dropna()
+        returns = series.pct_change().dropna()
+        risk_rows.append({
+            "종목": ticker,
+            "샤프지수": sharpe_ratio(returns),
+            "Sortino": sortino_ratio(returns),
+            "Calmar": calmar_ratio(series),
+        })
+    st.dataframe(pd.DataFrame(risk_rows).style.format({"샤프지수": "{:.2f}", "Sortino": "{:.2f}", "Calmar": "{:.2f}"}, na_rep="-"), hide_index=True, width="stretch")
+
     with st.expander("지수화된 원본 데이터 보기"):
         st.dataframe(prices, use_container_width=True)
 
@@ -1424,6 +1440,10 @@ def render_periodic_return_results() -> None:
     annual_col.metric("연환산 수익률", f"{summary['annualized_return']:+.2f}%")
     volatility_col.metric("연환산 변동성", f"{summary['annualized_volatility']:.2f}%")
     drawdown_col.metric("최대 낙폭", f"{summary['max_drawdown']:.2f}%")
+    risk_col1, risk_col2, risk_col3 = st.columns(3)
+    risk_col1.metric("샤프지수", f"{summary['sharpe']:.2f}")
+    risk_col2.metric("Sortino", f"{summary['sortino']:.2f}", help="하락 변동성 대비 수익")
+    risk_col3.metric("Calmar", f"{summary['calmar']:.2f}", help="MDD 대비 CAGR")
     st.caption("연환산 수익률과 변동성은 실제 조회 기간 및 일별 가격을 기준으로 계산합니다.")
 
     st.subheader(f"{result['frequency']} 수익률 분포")
