@@ -109,7 +109,7 @@ CONDITION_STATE_KEYS = {
         *[f"portfolio_weight_{index}" for index in range(5)],
     ],
     "allocation": [
-        "allocation_start", "allocation_end", "allocation_count", "allocation_step",
+        "allocation_start", "allocation_end", "allocation_count", "allocation_step", "allocation_rebalance", "allocation_initial",
         "allocation_ticker_1", "allocation_ticker_2", "allocation_ticker_3",
         "allocation_use_fixed", "allocation_fixed_index", "allocation_fixed_ratio",
     ],
@@ -443,23 +443,25 @@ def condition_default_values() -> dict[str, object]:
     """각 조건 입력의 기본값을 한 곳에서 정의한다."""
     today = datetime.date.today()
     defaults: dict[str, object] = {
-        "comparison_start_date": today - datetime.timedelta(days=365),
+        "comparison_start_date": today - datetime.timedelta(days=365 * 10),
         "comparison_end_date": today,
         "periodic_start": today - datetime.timedelta(days=365 * 10),
         "periodic_end": today,
         "periodic_ticker": "SPY",
         "periodic_frequency": "월",
-        "portfolio_start": today - datetime.timedelta(days=365 * 3),
+        "portfolio_start": today - datetime.timedelta(days=365 * 10),
         "portfolio_end": today,
         "portfolio_initial": 10000.0,
         "portfolio_invest_type": "거치식",
         "portfolio_rebalance": "매일",
         "portfolio_contribution": 1000.0,
         "portfolio_contribution_frequency": "매월",
-        "allocation_start": today - datetime.timedelta(days=365 * 3),
+        "allocation_start": today - datetime.timedelta(days=365 * 10),
         "allocation_end": today,
         "allocation_count": "2개",
         "allocation_step": "10%",
+        "allocation_rebalance": "매일",
+        "allocation_initial": 10000.0,
         "allocation_ticker_1": "QQQ",
         "allocation_ticker_2": "IAU",
         "allocation_ticker_3": "SPY",
@@ -475,7 +477,7 @@ def condition_default_values() -> dict[str, object]:
         defaults.update(
             {
                 f"{prefix}_ticker": "QQQ",
-                f"{prefix}_start": today - datetime.timedelta(days=365 * 5),
+                f"{prefix}_start": today - datetime.timedelta(days=365 * 10),
                 f"{prefix}_end": today,
                 f"{prefix}_horizon": 10.0,
                 f"{prefix}_simulations": 5000,
@@ -1559,6 +1561,11 @@ def render_allocation_conditions() -> None:
     with step_col:
         use_fixed = count == "3개" and st.session_state.get("allocation_use_fixed", False)
         step_label = st.selectbox("변화 비율", ["5%", "10%", "20%"], key="allocation_step", disabled=use_fixed)
+    rebalance_col, initial_col = st.columns(2)
+    with rebalance_col:
+        rebalance_frequency = st.selectbox("리밸런싱 주기", ["매일", "매월", "매분기", "매년"], key="allocation_rebalance")
+    with initial_col:
+        initial_investment = st.number_input("기준 투자금", min_value=1.0, step=1000.0, key="allocation_initial")
     use_fixed = False
     if count == "3개":
         use_fixed = st.checkbox("고정 비율 사용", key="allocation_use_fixed")
@@ -1603,10 +1610,10 @@ def render_allocation_conditions() -> None:
         prices, common_start, common_end = prepare_common_price_data(tickers, start_date, end_date)
         rows = []
         for weights in combos:
-            calculation = calculate_rebalanced_portfolio(prices, np.array(weights, dtype=float) / 100, 10000.0, "매일")
+            calculation = calculate_rebalanced_portfolio(prices, np.array(weights, dtype=float) / 100, float(initial_investment), rebalance_frequency)
             final_value = float(calculation["values"].iloc[-1])
             rows.append({**{f"{ticker} 비율": weight for ticker, weight in zip(tickers, weights)}, "최종 금액": final_value, **_allocation_metrics(calculation)})
-        st.session_state["allocation_result"] = {"tickers": tickers, "rows": pd.DataFrame(rows), "common_start": common_start, "common_end": common_end, "step": step}
+        st.session_state["allocation_result"] = {"tickers": tickers, "rows": pd.DataFrame(rows), "common_start": common_start, "common_end": common_end, "step": step, "rebalance_frequency": rebalance_frequency, "initial_investment": float(initial_investment)}
         st.session_state["current_page"] = "allocation_results"
         st.rerun()
     except Exception as error:
@@ -1621,7 +1628,7 @@ def render_allocation_results() -> None:
         st.session_state["current_page"] = "allocation_conditions"
         st.rerun()
     st.title("⚖️ 비율별 리밸런싱 분석 결과")
-    st.caption(f"공통 분석 기간: {result['common_start']:%Y-%m-%d} ~ {result['common_end']:%Y-%m-%d} · {len(result['rows'])}개 조합")
+    st.caption(f"공통 분석 기간: {result['common_start']:%Y-%m-%d} ~ {result['common_end']:%Y-%m-%d} · 리밸런싱: {result['rebalance_frequency']} · 기준 투자금: {result['initial_investment']:,.0f} · {len(result['rows'])}개 조합")
     rows = result["rows"]
     if len(result["tickers"]) == 2:
         figure, axis = plt.subplots(figsize=(12, 5.5))
