@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+from common.metrics import sortino_ratio, calmar_ratio
 
 ASSETS = ['XLE', 'XLK', 'XLU', 'XLP', 'IEF']
 MAP = {'reflation': [1,0,0,0,0], 'goldilocks': [0,1,0,0,0],
@@ -119,5 +120,6 @@ def metrics(nav, monthly=False):
     cagr = nav.iloc[-1]**(1/years)-1
     peaks = sampled.cummax().clip(lower=1)
     return {'CAGR':cagr,'Sharpe_rf0':returns.mean()*scale/vol if vol else np.nan,
+            'Sortino':sortino_ratio(returns, scale), 'Calmar':calmar_ratio(sampled, scale),
             'Volatility':vol,'MaxDD':(sampled/peaks-1).min(),'Terminal':nav.iloc[-1],
             'Start':str(nav.index[0].date()),'End':str(nav.index[-1].date())}

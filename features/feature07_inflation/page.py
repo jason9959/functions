@@ -62,7 +62,7 @@ def formatted_stats(nav,spy):
         m=metrics(v)
         rows.append({'전략':label,'연복리 수익률':f"{m['CAGR']:.2%}",
                      '최대낙폭 · 일별':f"{m['MaxDD']:.2%}",'연 변동성':f"{m['Volatility']:.2%}",
-                     '샤프 · 무위험 0%':f"{m['Sharpe_rf0']:.2f}"})
+                     '샤프 · 무위험 0%':f"{m['Sharpe_rf0']:.2f}", 'Sortino':f"{m['Sortino']:.2f}", 'Calmar':f"{m['Calmar']:.2f}"})
     return pd.DataFrame(rows)
 
 def yes_no(value):
@@ -393,7 +393,9 @@ def render(page: str) -> None:
         show['Model']=show.Model.map(labels)
         for c in ['CAGR','Volatility','MaxDD']: show[c]=show[c].map(lambda x:f'{x:.2%}')
         show['Sharpe_rf0']=show.Sharpe_rf0.map(lambda x:f'{x:.2f}')
-        st.dataframe(show[['Model','CAGR','MaxDD','Volatility','Sharpe_rf0','Start','End']].rename(columns={'Model':'검증 조건','CAGR':'연복리','MaxDD':'최대낙폭','Volatility':'연 변동성','Sharpe_rf0':'샤프 · 무위험 0%','Start':'실제 시작','End':'종료'}),hide_index=True,width='stretch')
+        for col in ['Sortino','Calmar']:
+            if col in show: show[col]=show[col].map(lambda x:f'{x:.2f}')
+        st.dataframe(show[['Model','CAGR','MaxDD','Volatility','Sharpe_rf0','Sortino','Calmar','Start','End']].rename(columns={'Model':'검증 조건','CAGR':'연복리','MaxDD':'최대낙폭','Volatility':'연 변동성','Sharpe_rf0':'샤프 · 무위험 0%','Start':'실제 시작','End':'종료'}),hide_index=True,width='stretch')
         st.caption('첫 진입일이 가정에 따라 다릅니다. 정확히 같은 시작일로 맞춘 비교는 전체 보고서에 있습니다.')
         st.subheader('현재 확인된 점')
         original=df[(df.Model=='Original_close')&(df.Frequency=='daily')].iloc[0]
