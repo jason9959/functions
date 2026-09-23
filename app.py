@@ -1504,6 +1504,44 @@ def _allocation_combinations(tickers: list[str], step: int, fixed_index: int | N
     return combos
 
 
+def _allocation_metrics(calculation: dict) -> dict[str, float]:
+    """리밸런싱 경로에서 조합 비교용 성과·위험 지표를 계산한다."""
+    values = calculation["values"].dropna()
+    daily = values.pct_change().dropna()
+    total_return = (values.iloc[-1] / values.iloc[0] - 1) * 100
+    years = max((values.index[-1] - values.index[0]).days / 365.2425, 1 / 365.2425)
+    cagr = ((values.iloc[-1] / values.iloc[0]) ** (1 / years) - 1) * 100
+    volatility = daily.std(ddof=1) * np.sqrt(252) * 100 if len(daily) > 1 else 0.0
+    sharpe = (daily.mean() / daily.std(ddof=1) * np.sqrt(252)) if len(daily) > 1 and daily.std(ddof=1) else 0.0
+    drawdown = values / values.cummax() - 1
+    mdd = float(drawdown.min() * 100)
+    trough = drawdown.idxmin()
+    peak_before = values.loc[:trough].cummax().iloc[-1]
+    recovery = values.loc[trough:][values.loc[trough:] >= peak_before]
+    recovery_days = float((recovery.index[0] - trough).days) if not recovery.empty else np.nan
+    return {
+        "총수익률": float(total_return),
+        "CAGR": float(cagr),
+        "변동성": float(volatility),
+        "최대낙폭": mdd,
+        "샤프지수": float(sharpe),
+        "회복기간(일)": recovery_days,
+    }
+
+
+def _allocation_best_rows(rows: pd.DataFrame) -> list[tuple[str, pd.Series, str]]:
+    """최종 금액을 제외하고 지표별 최고 조합을 반환한다. 낮을수록 좋은 지표는 별도 처리한다."""
+    rules = [("총수익률", "max", "+.2f"), ("CAGR", "max", "+.2f"), ("변동성", "min", ".2f"), ("최대낙폭", "max", ".2f"), ("샤프지수", "max", ".3f"), ("회복기간(일)", "min", ".0f")]
+    best = []
+    for metric, rule, fmt in rules:
+        candidates = rows[metric].dropna()
+        if candidates.empty:
+            continue
+        index = candidates.idxmax() if rule == "max" else candidates.idxmin()
+        best.append((metric, rows.loc[index], fmt))
+    return best
+
+
 def render_allocation_conditions() -> None:
     st.title("⚖️ 비율별 리밸런싱 분석")
     st.markdown("<p class='step-caption'>종목 비율을 바꿔가며 같은 기간의 리밸런싱 성과를 비교합니다.</p>", unsafe_allow_html=True)
@@ -1567,7 +1605,7 @@ def render_allocation_conditions() -> None:
         for weights in combos:
             calculation = calculate_rebalanced_portfolio(prices, np.array(weights, dtype=float) / 100, 10000.0, "매일")
             final_value = float(calculation["values"].iloc[-1])
-            rows.append({**{f"{ticker} 비율": weight for ticker, weight in zip(tickers, weights)}, "최종 금액": final_value, "수익률": (final_value / 10000 - 1) * 100, "최대낙폭": float(calculation["drawdown"].min() * 100)})
+            rows.append({**{f"{ticker} 비율": weight for ticker, weight in zip(tickers, weights)}, "최종 금액": final_value, **_allocation_metrics(calculation)})
         st.session_state["allocation_result"] = {"tickers": tickers, "rows": pd.DataFrame(rows), "common_start": common_start, "common_end": common_end, "step": step}
         st.session_state["current_page"] = "allocation_results"
         st.rerun()
@@ -1587,15 +1625,25 @@ def render_allocation_results() -> None:
     rows = result["rows"]
     if len(result["tickers"]) == 2:
         figure, axis = plt.subplots(figsize=(12, 5.5))
-        axis.plot(rows[f"{result['tickers'][0]} 비율"], rows["수익률"], marker="o", color="#3182F6")
+        axis.plot(rows[f"{result['tickers'][0]} 비율"], rows["총수익률"], marker="o", color="#3182F6")
         axis.set_xlabel(f"{result['tickers'][0]} 비율 (%)")
-        axis.set_ylabel("수익률 (%)")
+        axis.set_ylabel("총수익률 (%)")
         axis.grid(alpha=0.2)
         st.pyplot(figure)
         plt.close(figure)
     else:
         st.info("3종목 결과는 비율 조합별 성과표로 확인할 수 있습니다.")
-    st.dataframe(rows.style.format({"최종 금액": "{:,.0f}", "수익률": "{:+.2f}%", "최대낙폭": "{:.2f}%"}), width="stretch", hide_index=True)
+    st.subheader("지표별 최고 성과 조합")
+    best_rows = _allocation_best_rows(rows)
+    metric_cols = st.columns(min(3, max(1, len(best_rows))))
+    for index, (metric, best, fmt) in enumerate(best_rows):
+        ratio_text = " / ".join(f"{column.replace(' 비율', '')} {int(best[column])}%" for column in rows.columns if column.endswith(" 비율"))
+        value = best[metric]
+        suffix = "일" if metric == "회복기간(일)" else ("" if metric == "샤프지수" else "%")
+        display_value = "회복 불가" if pd.isna(value) else f"{format(value, fmt)}{suffix}"
+        metric_cols[index % len(metric_cols)].metric(metric, display_value, ratio_text)
+    table_format = {"최종 금액": "{:,.0f}", "총수익률": "{:+.2f}%", "CAGR": "{:+.2f}%", "변동성": "{:.2f}%", "최대낙폭": "{:.2f}%", "샤프지수": "{:.3f}", "회복기간(일)": "{:.0f}"}
+    st.dataframe(rows.style.format(table_format, na_rep="-"), width="stretch", hide_index=True)
     left, right = st.columns(2)
     with left:
         if st.button("조건 입력", key="back_to_allocation_conditions", use_container_width=True):
