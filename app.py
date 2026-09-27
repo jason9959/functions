@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 import yfinance as yf
 
 from features.feature01_comparison import page as feature01
@@ -24,6 +25,8 @@ from features.feature09_financial import page as feature09
 from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
+from common.metrics import performance_summary, mdd_recovery_days
+from common.metric_ui import render_metric_table, metric_help
 
 
 st.set_page_config(
@@ -945,7 +948,9 @@ def calculate_rebalanced_portfolio(
 
     value_series = pd.Series(portfolio_values, index=dates, name="Portfolio value")
     invested_series = pd.Series(invested_capital, index=dates, name="Invested capital")
-    drawdown = value_series / value_series.cummax() - 1
+    flows = invested_series.diff().fillna(0)
+    nav = (1 + ((value_series - flows) / value_series.shift(1) - 1).fillna(0)).cumprod()
+    drawdown = nav / nav.cummax() - 1
     return {
         "values": value_series,
         "invested": invested_series,
@@ -1008,8 +1013,20 @@ def run_monte_carlo_simulation(
     percentiles = np.percentile(value_paths, [5, 50, 95], axis=1)
     final_values = value_paths[-1]
     total_invested = initial_investment + contribution_amount * len(contribution_steps)
+    simple_returns = np.expm1(simulated_returns)
+    means = simple_returns.mean(axis=0)
+    vol = simple_returns.std(axis=0, ddof=1)
+    downside = np.sqrt(np.square(np.minimum(simple_returns, 0)).mean(axis=0))
+    mdd = np.abs((price_paths / np.maximum.accumulate(price_paths, axis=0) - 1).min(axis=0))
+    annual = (price_paths[-1] / price_paths[0]) ** (252 / n_days) - 1
+    risk_percentiles = {}
+    for name, numerator, denominator in [('샤프지수', means * np.sqrt(252), vol), ('Sortino', means * np.sqrt(252), downside), ('Calmar', annual, mdd)]:
+        ratios = np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 0)
+        finite = ratios[np.isfinite(ratios)]
+        risk_percentiles[name] = np.percentile(finite, [5, 50, 95]) if finite.size else [np.nan] * 3
     return {
         "ticker": ticker,
+        "risk_percentiles": risk_percentiles,
         "method": method_name,
         "historical_start": historical_prices.index[0],
         "historical_end": historical_prices.index[-1],
@@ -1051,16 +1068,6 @@ def build_portfolio_report_image(result: dict) -> bytes:
     final_value = float(values.iloc[-1])
     final_invested = float(invested.iloc[-1])
     total_return = (final_value / final_invested - 1) * 100 if final_invested else 0
-    daily_returns = values.pct_change().dropna()
-    sharpe = sharpe_ratio(daily_returns)
-    sortino = sortino_ratio(daily_returns)
-    calmar = calmar_ratio(values)
-    events = result.get("calculation", {}).get("events") if isinstance(result.get("calculation"), dict) else None
-    xirr_value = float("nan")
-    if events is not None and not events.empty and "amount" in events:
-        flows = events.loc[events["amount"] > 0, "amount"]
-        dates = events.loc[events["amount"] > 0, "date"]
-        xirr_value = cashflow_xirr(dates, flows, final_value, float(result.get("initial_investment", final_invested)))
     figure.text(0.08, 0.94, "PORTFOLIO BACKTEST REPORT", fontsize=22, fontweight="bold", color="#191F28")
     figure.text(
         0.08,
@@ -1267,37 +1274,19 @@ def render_return_comparison_results() -> None:
     st.pyplot(figure)
     plt.close(figure)
 
-    st.subheader("최종 수익률")
-    metric_columns = st.columns(min(len(result["tickers"]), 5))
-    for index, ticker in enumerate(result["tickers"]):
-        final_value = float(prices[ticker].iloc[-1])
-        metric_columns[index % 5].metric(
-            ticker,
-            f"{final_value:.2f}",
-            f"{final_value - 100:+.2f}%",
-        )
-
     st.subheader("위험·수익 지표")
-    risk_rows = []
-    for ticker in result["tickers"]:
-        series = prices[ticker].dropna()
-        returns = series.pct_change().dropna()
-        risk_rows.append({
-            "종목": ticker,
-            "샤프지수": sharpe_ratio(returns),
-            "Sortino": sortino_ratio(returns),
-            "Calmar": calmar_ratio(series),
-        })
-    st.dataframe(pd.DataFrame(risk_rows).style.format({"샤프지수": "{:.2f}", "Sortino": "{:.2f}", "Calmar": "{:.2f}"}, na_rep="-"), hide_index=True, width="stretch")
+    render_metric_table({ticker: performance_summary(prices[ticker]) for ticker in result['tickers']}, heading='종목')
 
     with st.expander("지수화된 원본 데이터 보기"):
-        st.dataframe(prices, use_container_width=True)
+        dated_prices = prices.copy()
+        dated_prices.index = dated_prices.index.strftime('%Y-%m-%d')
+        metric_dataframe(st, dated_prices, use_container_width=True)
 
     report_image = build_comparison_report_image(result)
     input_col, save_col = st.columns(2)
     with input_col:
         if st.button(
-            "종목 입력",
+            '뒤로',
             key="back_to_conditions",
             use_container_width=True,
         ):
@@ -1436,14 +1425,16 @@ def render_periodic_return_results() -> None:
     plt.close(price_figure)
 
     return_col, annual_col, volatility_col, drawdown_col = st.columns(4)
-    return_col.metric("전체 수익률", f"{summary['total_return']:+.2f}%")
-    annual_col.metric("연환산 수익률", f"{summary['annualized_return']:+.2f}%")
-    volatility_col.metric("연환산 변동성", f"{summary['annualized_volatility']:.2f}%")
-    drawdown_col.metric("최대 낙폭", f"{summary['max_drawdown']:.2f}%")
+    render_metric(return_col, "전체 수익률", f"{summary['total_return']:+.2f}%")
+    render_metric(annual_col, "연환산 수익률", f"{summary['annualized_return']:+.2f}%")
+    render_metric(volatility_col, "연환산 변동성", f"{summary['annualized_volatility']:.2f}%")
+    render_metric(drawdown_col, "최대 낙폭", f"{summary['max_drawdown']:.2f}%")
     risk_col1, risk_col2, risk_col3 = st.columns(3)
-    risk_col1.metric("샤프지수", f"{summary['sharpe']:.2f}")
-    risk_col2.metric("Sortino", f"{summary['sortino']:.2f}", help="하락 변동성 대비 수익")
-    risk_col3.metric("Calmar", f"{summary['calmar']:.2f}", help="MDD 대비 CAGR")
+    render_metric(risk_col1, "샤프지수", f"{summary['sharpe']:.2f}")
+    render_metric(risk_col2, "Sortino", f"{summary['sortino']:.2f}", help="하락 변동성 대비 수익")
+    render_metric(risk_col3, "Calmar", f"{summary['calmar']:.2f}", help="MDD 대비 CAGR")
+    recovery = mdd_recovery_days(result['indexed_prices'])
+    render_metric(st, 'MDD 회복기간(고점 기준)', '미회복' if pd.isna(recovery) else f'{recovery:.0f}일', help=metric_help('MDD 회복기간(고점 기준)'))
     st.caption("연환산 수익률과 변동성은 실제 조회 기간 및 일별 가격을 기준으로 계산합니다.")
 
     st.subheader(f"{result['frequency']} 수익률 분포")
@@ -1458,10 +1449,10 @@ def render_periodic_return_results() -> None:
     plt.close(histogram)
 
     positive_col, negative_col, average_col, median_col = st.columns(4)
-    positive_col.metric("상승 확률", f"{summary['positive_probability']:.1f}%")
-    negative_col.metric("하락·보합 확률", f"{summary['nonpositive_probability']:.1f}%")
-    average_col.metric("평균 수익률", f"{summary['average_period_return']:+.2f}%")
-    median_col.metric("중앙값 수익률", f"{summary['median_period_return']:+.2f}%")
+    render_metric(positive_col, "상승 확률", f"{summary['positive_probability']:.1f}%")
+    render_metric(negative_col, "하락·보합 확률", f"{summary['nonpositive_probability']:.1f}%")
+    render_metric(average_col, "평균 수익률", f"{summary['average_period_return']:+.2f}%")
+    render_metric(median_col, "중앙값 수익률", f"{summary['median_period_return']:+.2f}%")
     st.caption(
         f"총 {len(period_returns):,}개 구간 · 최고 {summary['best_period_return']:+.2f}% · "
         f"최저 {summary['worst_period_return']:+.2f}%"
@@ -1475,7 +1466,7 @@ def render_periodic_return_results() -> None:
     frequency_style = frequency_table.style.apply(lambda _: interval_styles, axis=None)
     frequency_left, frequency_center, frequency_right = st.columns([1, 1.35, 1])
     with frequency_center:
-        st.dataframe(
+        metric_dataframe(st, 
             frequency_style,
             width="stretch",
             hide_index=True,
@@ -1495,12 +1486,12 @@ def render_periodic_return_results() -> None:
     side_width = max((1180 - target_width) / 2, 1)
     pivot_left, pivot_center, pivot_right = st.columns([side_width, target_width, side_width])
     with pivot_center:
-        st.dataframe(pivot_style, width="stretch")
+        metric_dataframe(st, pivot_style, width="stretch")
 
     report_image = build_periodic_report_image(result)
     input_col, save_col = st.columns(2)
     with input_col:
-        if st.button("조건 입력", key="back_to_periodic_conditions", use_container_width=True):
+        if st.button('뒤로', key="back_to_periodic_conditions", use_container_width=True):
             st.session_state["current_page"] = "periodic_conditions"
             st.rerun()
     with save_col:
@@ -1549,10 +1540,7 @@ def _allocation_metrics(calculation: dict) -> dict[str, float]:
     sortino = sortino_ratio(daily)
     drawdown = values / values.cummax() - 1
     mdd = float(drawdown.min() * 100)
-    trough = drawdown.idxmin()
-    peak_before = values.loc[:trough].cummax().iloc[-1]
-    recovery = values.loc[trough:][values.loc[trough:] >= peak_before]
-    recovery_days = float((recovery.index[0] - trough).days) if not recovery.empty else np.nan
+    recovery_days = mdd_recovery_days(values)
     return {
         "총수익률": float(total_return),
         "CAGR": float(cagr),
@@ -1682,12 +1670,15 @@ def render_allocation_results() -> None:
         value = best[metric]
         suffix = "일" if metric == "회복기간(일)" else ("" if metric in {"샤프지수", "Sortino", "Calmar"} else "%")
         display_value = "회복 불가" if pd.isna(value) else f"{format(value, fmt)}{suffix}"
-        metric_cols[index % len(metric_cols)].metric(metric, display_value, ratio_text)
+        render_metric(metric_cols[index % len(metric_cols)], metric, display_value, ratio_text)
     table_format = {"최종 금액": "{:,.0f}", "총수익률": "{:+.2f}%", "CAGR": "{:+.2f}%", "변동성": "{:.2f}%", "최대낙폭": "{:.2f}%", "샤프지수": "{:.3f}", "Sortino": "{:.3f}", "Calmar": "{:.3f}", "회복기간(일)": "{:.0f}"}
-    st.dataframe(rows.style.format(table_format, na_rep="-"), width="stretch", hide_index=True)
+    display_rows = rows.copy()
+    display_rows['회복기간(일)'] = rows['회복기간(일)'].map(lambda value: '미회복' if pd.isna(value) else f'{value:.0f}일')
+    table_format.pop('회복기간(일)', None)
+    metric_dataframe(st, display_rows.style.format(table_format, na_rep="-"), width="stretch", hide_index=True)
     left, right = st.columns(2)
     with left:
-        if st.button("조건 입력", key="back_to_allocation_conditions", use_container_width=True):
+        if st.button('뒤로', key="back_to_allocation_conditions", use_container_width=True):
             st.session_state["current_page"] = "allocation_conditions"
             st.rerun()
     with right:
@@ -1832,6 +1823,8 @@ def render_portfolio_results() -> None:
 
     values = result["values"]
     invested = result["invested"]
+    contributions = invested.diff().fillna(0.0)
+    perf = performance_summary(values, contributions, float(invested.iloc[0]))
     st.title("💼 포트폴리오 백테스트 결과")
     st.caption(
         f"공통 분석 기간: {result['common_start']:%Y-%m-%d} ~ {result['common_end']:%Y-%m-%d} · "
@@ -1851,16 +1844,13 @@ def render_portfolio_results() -> None:
     final_invested = float(invested.iloc[-1])
     total_return = (final_value / final_invested - 1) * 100 if final_invested else 0
     metric_cols = st.columns(4)
-    metric_cols[0].metric("최종 자산", f"{final_value:,.0f}")
-    metric_cols[1].metric("총 투입금", f"{final_invested:,.0f}")
-    metric_cols[2].metric("총 수익률", f"{total_return:+.2f}%")
-    metric_cols[3].metric("최대 낙폭", f"{float(result['drawdown'].min() * 100):.2f}%")
-    risk_cols = st.columns(4)
-    risk_cols[0].metric("샤프지수", f"{sharpe:.2f}")
-    risk_cols[1].metric("Sortino", f"{sortino:.2f}", help="하락 변동성 대비 수익")
-    risk_cols[2].metric("Calmar", f"{calmar:.2f}", help="MDD 대비 CAGR")
-    if result.get("contribution_amount", 0) > 0:
-        risk_cols[3].metric("적립식 XIRR", f"{xirr_value * 100:.2f}%", help="실제 현금투입 기준 수익률")
+    render_metric(metric_cols[0], "최종 자산", f"{final_value:,.0f}")
+    render_metric(metric_cols[1], "총 투입금", f"{final_invested:,.0f}")
+    render_metric(metric_cols[2], "총 수익률", f"{total_return:+.2f}%")
+    render_metric(metric_cols[3], "최대 낙폭", f"{float(result['drawdown'].min() * 100):.2f}%")
+    if not contributions.any():
+        perf.pop('적립식 XIRR', None)
+    render_metric_table({'포트폴리오': perf})
 
     st.subheader("낙폭 추이")
     drawdown_figure, drawdown_axis = plt.subplots(figsize=(12, 3.8))
@@ -1880,15 +1870,15 @@ def render_portfolio_results() -> None:
     plt.close(drawdown_figure)
 
     st.subheader("설정한 자산 비중")
-    st.dataframe(pd.DataFrame(result["portfolio"]), use_container_width=True, hide_index=True)
+    metric_dataframe(st, pd.DataFrame(result["portfolio"]), use_container_width=True, hide_index=True)
     if not result["events"].empty:
         with st.expander("적립 · 리밸런싱 이벤트 보기"):
-            st.dataframe(result["events"], use_container_width=True, hide_index=True)
+            metric_dataframe(st, result["events"], use_container_width=True, hide_index=True)
 
     report_image = build_portfolio_report_image(result)
     input_col, save_col = st.columns(2)
     with input_col:
-        if st.button("조건 입력", key="back_to_portfolio_conditions", use_container_width=True):
+        if st.button('뒤로', key="back_to_portfolio_conditions", use_container_width=True):
             st.session_state["current_page"] = "portfolio_conditions"
             st.rerun()
     with save_col:
@@ -2034,27 +2024,25 @@ def render_monte_carlo_results(method: str) -> None:
     plt.close(figure)
 
     final_p5, final_median, final_p95 = np.percentile(result["final_values"], [5, 50, 95])
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("총 예상 투입금", f"{result['total_invested']:,.0f}")
-    metric_cols[1].metric("하위 5%", f"{final_p5:,.0f}")
-    metric_cols[2].metric("중위값", f"{final_median:,.0f}")
-    metric_cols[3].metric("상위 5%", f"{final_p95:,.0f}")
-
-    st.subheader("위험·현금흐름 지표")
+    st.subheader("백테스팅 결과")
     metric_rows = []
     sim_dates = pd.date_range(result["historical_end"], periods=percentile_paths.shape[1], freq="B")
     contribution_steps = set()
     if result["contribution_amount"]:
         interval = {"매월": 21, "매분기": 63, "매년": 252}.get(result["contribution_frequency"], 21)
         contribution_steps = set(range(interval, percentile_paths.shape[1], interval))
-    for label, path in zip(("P5", "P50", "P95"), percentile_paths):
-        row = {"분위": label, "샤프지수": sharpe_ratio(pd.Series(path).pct_change().dropna()), "Sortino": sortino_ratio(pd.Series(path).pct_change().dropna()), "Calmar": calmar_ratio(path)}
+    for percentile_index, (label, path) in enumerate(zip(("하위 5% (P5)", "중위값 (P50)", "상위 5% (P95)"), percentile_paths)):
+        row = {"분위": label, "총 예상 투입금": f"{result['total_invested']:,.0f}", "최종 예상 금액": f"{path[-1]:,.0f}"}
+        for name in ('샤프지수', 'Sortino', 'Calmar'):
+            value = result.get('risk_percentiles', {}).get(name, [np.nan] * 3)[percentile_index]
+            row[name] = f'{value:.2f}' if np.isfinite(value) else '-'
         if result["contribution_amount"]:
-            dates = [sim_dates[i] for i in sorted(contribution_steps)]
-            amounts = [result["contribution_amount"]] * len(dates)
-            row["적립식 XIRR"] = cashflow_xirr(dates, amounts, float(path[-1]), result["initial_investment"])
+            amounts = [result['contribution_amount'] if i in contribution_steps else 0.0 for i in range(len(sim_dates))]
+            rate = cashflow_xirr(sim_dates, amounts, float(path[-1]), result["initial_investment"])
+            row["적립식 XIRR"] = f'{rate:.2%}' if np.isfinite(rate) else '-'
         metric_rows.append(row)
-    st.dataframe(pd.DataFrame(metric_rows).style.format({"샤프지수":"{:.2f}", "Sortino":"{:.2f}", "Calmar":"{:.2f}", "적립식 XIRR":"{:.2%}"}, na_rep="-"), hide_index=True, width="stretch")
+    render_metric_table({row.pop('분위'): row for row in metric_rows})
+    st.caption('각 지표의 P5/P50/P95는 각각의 분포에서 계산하므로 같은 열이 동일한 시뮬레이션 경로를 뜻하지 않습니다. 위험 지표는 각 경로의 납입 효과를 제외한 수익률로 계산합니다. XIRR은 가정 납입 일정과 최종 금액 기준입니다. 기존 결과의 위험 지표가 비어 있으면 다시 조회해주세요.')
 
     histogram, histogram_axis = plt.subplots(figsize=(12, 4))
     histogram_axis.hist(result["final_values"], bins=60, alpha=0.82)
@@ -2078,12 +2066,12 @@ def render_monte_carlo_results(method: str) -> None:
             ],
         }
     )
-    st.dataframe(percentile_table, use_container_width=True, hide_index=True)
+    metric_dataframe(st, percentile_table, use_container_width=True, hide_index=True)
 
     report_image = build_monte_carlo_report_image(result)
     input_col, save_col = st.columns(2)
     with input_col:
-        if st.button("조건 입력", key=f"back_to_{method}_conditions", use_container_width=True):
+        if st.button("뒤로", key=f"back_to_{method}_conditions", use_container_width=True):
             st.session_state["current_page"] = f"monte_{method}_conditions"
             st.rerun()
     with save_col:
