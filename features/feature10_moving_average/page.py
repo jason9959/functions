@@ -6,8 +6,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 
 from .backtest import run_backtest
+from common.metrics import performance_summary
+from common.metric_ui import render_metric_table
 from .charts import portfolio_chart, price_chart
 from .data_loader import load_price_data
 from .reporting import create_result_png
@@ -233,25 +236,6 @@ def show_result_page() -> None:
         metrics=metrics,
     )
 
-    top_left, top_spacer, top_right = st.columns([1.2, 4, 1.5])
-    with top_left:
-        st.button(
-            "← 조건으로 돌아가기",
-            use_container_width=True,
-            on_click=go_back,
-        )
-    with top_right:
-        st.download_button(
-            "결과 이미지 저장",
-            data=png_bytes,
-            file_name=(
-                f"{ticker}_MA{int(context['ma_months'])}_"
-                f"C{int(context['confirmation_count'])}_L{int(context['signal_limit_days'])}_backtest.png"
-            ),
-            mime="image/png",
-            use_container_width=True,
-        )
-
     st.title(f"{ticker} 백테스트 결과")
     st.caption(
         f"{context['start_date']} ~ {context['end_date']} · {int(context['ma_months'])}개월 이동평균 · "
@@ -259,23 +243,17 @@ def show_result_page() -> None:
         f"시그널 대기 LIMIT {int(context['signal_limit_days'])}거래일 · 당일 종가 체결"
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("총 납입금", money(metrics["total_contributions"]))
-    c2.metric("최종 자산", money(metrics["final_value"]))
-    c3.metric("투자 수익", money(metrics["profit"]))
-    c4.metric("수익률", f"{metrics['return_pct']:.2f}%")
-
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("MDD", f"{metrics['mdd_pct']:.2f}%")
-    c6.metric(f"{ticker} 최종", money(metrics["buy_hold_final_value"]))
-    c7.metric("매수 전환", f"{metrics['buy_count']}회")
-    c8.metric("매도 전환", f"{metrics['sell_count']}회")
-    c9, c10, c11, c12 = st.columns(4)
-    c9.metric("샤프지수", f"{metrics['sharpe']:.2f}")
-    c10.metric("Sortino", f"{metrics['sortino']:.2f}", help="하락 변동성 대비 수익")
-    c11.metric("Calmar", f"{metrics['calmar']:.2f}", help="MDD 대비 CAGR")
-    if context["use_contribution"]:
-        c12.metric("적립식 XIRR", f"{metrics['xirr'] * 100:.2f}%", help="실제 현금투입 기준 수익률")
+    comparison = {}
+    for label, column in [('이동평균 전략', 'portfolio_value'), (f'{ticker} 단순 보유', 'buy_hold_value')]:
+        values = daily[column]
+        details = performance_summary(values, daily['contribution'], float(context['initial_amount']))
+        details = {'총 납입금': money(metrics['total_contributions']), '최종 자산': money(values.iloc[-1]), '투자 수익': money(values.iloc[-1] - metrics['total_contributions']), **details}
+        if not context['use_contribution']:
+            details.pop('적립식 XIRR', None)
+        comparison[label] = details
+    st.subheader('백테스팅 결과')
+    render_metric_table(comparison)
+    st.caption('동일한 초기 투자금과 적립 일정으로 비교합니다. 위험 지표에서는 납입금 증가 효과를 제외합니다.')
 
     st.caption(
         f"실제 첫 거래일: {metrics['effective_start_date']} · 종료 포지션: {metrics['ending_position']} · "
@@ -312,7 +290,7 @@ def show_result_page() -> None:
         display_events["금액"] = display_events["amount"].map(lambda x: f"{x:,.0f}")
         display_events["적립금"] = display_events["contribution"].map(lambda x: f"{x:,.0f}")
         display_events["설명"] = display_events["note"]
-        st.dataframe(
+        metric_dataframe(st, 
             display_events[["날짜", "구분", "가격", "금액", "적립금", "설명"]],
             use_container_width=True,
             hide_index=True,
@@ -323,7 +301,7 @@ def show_result_page() -> None:
             schedule_view = output.schedule.copy()
             schedule_view["예정 적립일"] = schedule_view["scheduled_date"].dt.strftime("%Y-%m-%d")
             schedule_view["실제 적립일"] = schedule_view["actual_date"].dt.strftime("%Y-%m-%d")
-            st.dataframe(
+            metric_dataframe(st, 
                 schedule_view[["예정 적립일", "실제 적립일"]],
                 use_container_width=True,
                 hide_index=True,
@@ -333,6 +311,13 @@ def show_result_page() -> None:
         "가정: 수정 종가(Adjusted Close), 소수점 매수 허용, 수수료·세금·환율·현금이자 미반영. "
         "이 결과는 전략 테스트용이며 실제 체결 결과와 다를 수 있습니다."
     )
+
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        st.button('뒤로', use_container_width=True, on_click=go_back, key='ma_results_back')
+    with right:
+        st.download_button('결과 저장', data=png_bytes, file_name=f'{ticker}_backtest.png', mime='image/png', use_container_width=True, key='ma_results_save')
 
 
 def render(page: str) -> None:
