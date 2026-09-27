@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 import pandas as pd
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 from .compass import Config, signals, backtest, metrics
 
 ROOT = Path(__file__).resolve().parent
@@ -197,7 +198,7 @@ def render(page: str) -> None:
     elif local_page=='rules':
         st.title('📖 전략 이해하기')
         st.write('월말마다 성장과 기대인플레이션 신호를 확인하고 다음 달의 보유 자산을 정하는 전략입니다.')
-        st.dataframe(pd.DataFrame([
+        metric_dataframe(st, pd.DataFrame([
             {'성장':'상승','인플레이션':'ON','보유 자산':'XLE · 에너지 100%'},
             {'성장':'상승','인플레이션':'OFF','보유 자산':'XLK · 기술 100%'},
             {'성장':'하락','인플레이션':'ON','보유 자산':'XLU · 유틸리티 100%'},
@@ -279,11 +280,11 @@ def render(page: str) -> None:
             st.info('당일 종가로 신호를 계산하고 같은 종가에 체결한 가정입니다. 실제 거래 가능성을 별도로 확인해야 합니다.')
         m=metrics(nav); mm=metrics(nav,True)
         first_row=st.columns(2)
-        first_row[0].metric('연복리 수익률',f"{m['CAGR']:.2%}")
-        first_row[1].metric('최종 평가금액',f'${nav.iloc[-1]*initial:,.0f}')
+        render_metric(first_row[0], '연복리 수익률',f"{m['CAGR']:.2%}")
+        render_metric(first_row[1], '최종 평가금액',f'${nav.iloc[-1]*initial:,.0f}')
         second_row=st.columns(2)
-        second_row[0].metric('최대낙폭 · 일별',f"{m['MaxDD']:.2%}")
-        second_row[1].metric('최대낙폭 · 월별',f"{mm['MaxDD']:.2%}")
+        render_metric(second_row[0], '최대낙폭 · 일별',f"{m['MaxDD']:.2%}")
+        render_metric(second_row[1], '최대낙폭 · 월별',f"{mm['MaxDD']:.2%}")
         t1,t2,t3=st.tabs(['포트폴리오 성과','룰 지표와 월말 판정','계산 가정'])
         with t1:
             st.subheader('자산 가치 변화')
@@ -296,7 +297,7 @@ def render(page: str) -> None:
                     holding_annotations[e.date]=holding
                     previous_holding=holding
             st.image(static_line_chart(value_chart,['#3182F6','#A5ABB3'],'Portfolio value (USD)',340,holding_annotations),width='stretch')
-            st.dataframe(formatted_stats(nav,spy),hide_index=True,width='stretch')
+            metric_dataframe(st, formatted_stats(nav,spy),hide_index=True,width='stretch')
             st.subheader('고점 대비 하락률')
             dd=pd.DataFrame({'Compass':(nav/nav.cummax().clip(lower=1)-1)*100,'SPY':(spy/spy.cummax()-1)*100})
             st.image(static_line_chart(dd,['#3182F6','#A5ABB3'],'Drawdown (%)',240,holding_annotations),width='stretch')
@@ -306,10 +307,10 @@ def render(page: str) -> None:
             latest=decisions.iloc[-1]
             st.caption(f"{latest['신호일']:%Y.%m.%d} 월말 신호 → {latest['체결일']:%Y.%m.%d} 체결 → {latest['보유 자산']}")
             cards=st.columns(4)
-            cards[0].metric('1. 성장',yes_no(latest['SPY']>latest['SPY 200일 SMA']),f"SPY {latest['SPY']:.2f} / SMA {latest['SPY 200일 SMA']:.2f}")
-            cards[1].metric('2. 기대물가 수준',yes_no(latest['T5YIE']>cfg.threshold),f"{latest['T5YIE']:.2f}% / 기준 {cfg.threshold:.2f}%")
-            cards[2].metric('3. 기대물가 모멘텀',yes_no(latest['T5YIE 60일 변화']>0),f"60일 변화 {latest['T5YIE 60일 변화']:+.2f}%p")
-            cards[3].metric('4. 자산 모멘텀',yes_no(latest['지표 60일 회귀 기울기']>0),f"기울기 {latest['지표 60일 회귀 기울기']:+.6f}")
+            render_metric(cards[0], '1. 성장',yes_no(latest['SPY']>latest['SPY 200일 SMA']),f"SPY {latest['SPY']:.2f} / SMA {latest['SPY 200일 SMA']:.2f}")
+            render_metric(cards[1], '2. 기대물가 수준',yes_no(latest['T5YIE']>cfg.threshold),f"{latest['T5YIE']:.2f}% / 기준 {cfg.threshold:.2f}%")
+            render_metric(cards[2], '3. 기대물가 모멘텀',yes_no(latest['T5YIE 60일 변화']>0),f"60일 변화 {latest['T5YIE 60일 변화']:+.2f}%p")
+            render_metric(cards[3], '4. 자산 모멘텀',yes_no(latest['지표 60일 회귀 기울기']>0),f"기울기 {latest['지표 60일 회귀 기울기']:+.6f}")
             st.info(f"결합 결과: 기대물가 수준 {latest['2% 수준 조건']} AND (기대물가 모멘텀 {latest['기대물가 모멘텀']} OR 자산 모멘텀 {latest['자산 모멘텀']}) → 인플레이션 ON {latest['인플레이션 ON']} · {latest['국면']}")
 
             requested_start=pd.Timestamp(st.session_state.setdefault('f06_saved', {})['start'])
@@ -357,7 +358,7 @@ def render(page: str) -> None:
                     .map(status_cell,subset=condition_columns)
                     .map(regime_cell,subset=['국면 · 성장','국면 · 인플레이션'])
                     .format({'SPY':'{:.2f}','SPY 200일 SMA':'{:.2f}'}))
-            st.dataframe(styled,hide_index=True,width='stretch',height=420)
+            metric_dataframe(st, styled,hide_index=True,width='stretch',height=420)
             st.caption('모든 판정은 월말 마지막 거래일 값입니다. 해당 판정으로 정한 자산을 다음 달에 보유합니다.')
         with t3:
             st.write('USD 기준, 배당·분할 조정 종가를 사용합니다. 세금·환율은 포함하지 않습니다. XLP/IEF는 매월 50:50으로 조정하고 월중에는 비중 변화를 허용합니다.')
@@ -376,7 +377,7 @@ def render(page: str) -> None:
         st.divider()
         back_col,save_col=st.columns(2)
         with back_col:
-            if st.button('조건으로 돌아가기',key='back_f06_results',width='stretch'):
+            if st.button('뒤로',key='back_f06_results',width='stretch'):
                 go('conditions'); st.rerun()
         with save_col:
             st.download_button('결과 저장',report_png,'inflation-compass-result.png','image/png',key='download_f06_result',width='stretch')
@@ -390,12 +391,17 @@ def render(page: str) -> None:
         labels={'Original_close':'원문 재현 가정','Trade_next_close':'다음 날 종가 체결','FRED_previous_day':'FRED 하루 지연','Conservative_10bp':'보수적 · 10bp','Conservative_20bp':'보수적 · 20bp','Level_only':'물가 수준만','No_basket':'바스켓 제외','No_FRED':'FRED 제외','SPY':'SPY'}
         frequency=st.radio('위험 측정 주기',['일별','월별'],horizontal=True)
         show=df.loc[df.Frequency==('daily' if frequency=='일별' else 'monthly')].copy()
+        if 'Calmar' not in show:
+            show['Calmar'] = show['CAGR'] / show['MaxDD'].abs().replace(0, float('nan'))
+        if 'Sortino' not in show:
+            show['Sortino'] = float('nan')
+            st.caption('이 검증 파일에는 하락 변동성 자료가 없어 Sortino는 미계산으로 표시합니다. 검증 보고서를 재생성하면 반영됩니다.')
         show['Model']=show.Model.map(labels)
         for c in ['CAGR','Volatility','MaxDD']: show[c]=show[c].map(lambda x:f'{x:.2%}')
         show['Sharpe_rf0']=show.Sharpe_rf0.map(lambda x:f'{x:.2f}')
         for col in ['Sortino','Calmar']:
-            if col in show: show[col]=show[col].map(lambda x:f'{x:.2f}')
-        st.dataframe(show[['Model','CAGR','MaxDD','Volatility','Sharpe_rf0','Sortino','Calmar','Start','End']].rename(columns={'Model':'검증 조건','CAGR':'연복리','MaxDD':'최대낙폭','Volatility':'연 변동성','Sharpe_rf0':'샤프 · 무위험 0%','Start':'실제 시작','End':'종료'}),hide_index=True,width='stretch')
+            if col in show: show[col]=show[col].map(lambda x:'미계산' if pd.isna(x) else f'{x:.2f}')
+        metric_dataframe(st, show[['Model','CAGR','MaxDD','Volatility','Sharpe_rf0','Sortino','Calmar','Start','End']].rename(columns={'Model':'검증 조건','CAGR':'연복리','MaxDD':'최대낙폭','Volatility':'연 변동성','Sharpe_rf0':'샤프 · 무위험 0%','Start':'실제 시작','End':'종료'}),hide_index=True,width='stretch')
         st.caption('첫 진입일이 가정에 따라 다릅니다. 정확히 같은 시작일로 맞춘 비교는 전체 보고서에 있습니다.')
         st.subheader('현재 확인된 점')
         original=df[(df.Model=='Original_close')&(df.Frequency=='daily')].iloc[0]

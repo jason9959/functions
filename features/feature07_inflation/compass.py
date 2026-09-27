@@ -120,6 +120,6 @@ def metrics(nav, monthly=False):
     cagr = nav.iloc[-1]**(1/years)-1
     peaks = sampled.cummax().clip(lower=1)
     return {'CAGR':cagr,'Sharpe_rf0':returns.mean()*scale/vol if vol else np.nan,
-            'Sortino':sortino_ratio(returns, scale), 'Calmar':calmar_ratio(sampled, scale),
+            'Sortino':sortino_ratio(returns, scale), 'Calmar':cagr / abs((sampled/peaks-1).min()) if (sampled/peaks-1).min() < 0 else np.nan,
             'Volatility':vol,'MaxDD':(sampled/peaks-1).min(),'Terminal':nav.iloc[-1],
             'Start':str(nav.index[0].date()),'End':str(nav.index[-1].date())}
