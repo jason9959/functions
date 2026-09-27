@@ -8,7 +8,10 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
+from common.metrics import performance_summary
+from common.metric_ui import render_metric_table
 
 
 
@@ -508,7 +511,7 @@ def _overview():
     st.title('💵 오늘의 달러 투자 환경'); st.caption(f"기준일 {pd.Timestamp(x['date']).date()} · 조건 {int(x['signal_score'])}/4")
     cols=st.columns(4)
     vals=[('원/달러',x.cond_fx_below_avg,f"{x.usdkrw:,.2f}원"),('달러지수',x.cond_dxy_below_avg,f"{x.dxy:,.2f}"),('달러갭',x.cond_gap_above_avg,f"{x.gap_ratio:,.3f}"),('적정환율',x.cond_fx_below_fair,f"{x.fair_rate:,.2f}원")]
-    for c,(name,ok,val) in zip(cols,vals): c.metric(name,val,'충족' if ok else '미충족')
+    for c,(name,ok,val) in zip(cols,vals): render_metric(c, name,val,'충족' if ok else '미충족')
     view=data.tail(252).melt(id_vars=['date'],value_vars=['usdkrw','fair_rate'],var_name='series',value_name='value')
     st.altair_chart(alt.Chart(view).mark_line().encode(x='date:T',y=alt.Y('value:Q',scale=alt.Scale(zero=False)),color='series:N').properties(height=360),use_container_width=True)
     st.divider(); l,r=st.columns(2)
@@ -540,20 +543,18 @@ def _results():
     if 'f07_result' not in st.session_state: _goto('f07_conditions'); st.rerun(); return
     curve,switches=st.session_state['f07_result']; ctx=st.session_state['f07_saved']; x=curve.iloc[-1]
     st.title('💵 달러 환율 나침반 결과'); st.caption(f"{ctx['start']} ~ {ctx['end']}")
-    cols=st.columns(5); cols[0].metric('총 납입',f"{x.total_contribution:,.0f}원"); cols[1].metric('최종 자산',f"{x.total_value:,.0f}원"); cols[2].metric('수익률',f"{x['return']*100:.2f}%"); cols[3].metric('MDD',f"{max_drawdown(curve.total_value)*100:.2f}%"); cols[4].metric('전환',f'{len(switches)}회')
-    returns = curve.total_value.pct_change().dropna()
-    risk = st.columns(4)
-    risk[0].metric('샤프지수', f'{sharpe_ratio(returns):.2f}')
-    risk[1].metric('Sortino', f'{sortino_ratio(returns):.2f}', help='하락 변동성 대비 수익')
-    risk[2].metric('Calmar', f'{calmar_ratio(curve.total_value):.2f}', help='MDD 대비 CAGR')
-    if ctx['recurring']:
-        increments = curve.total_contribution.diff().fillna(curve.total_contribution.iloc[0])
-        risk[3].metric('적립식 XIRR', f'{cashflow_xirr(curve.date, increments, x.total_value):.2f}')
+    cols=st.columns(5); render_metric(cols[0], '총 납입',f"{x.total_contribution:,.0f}원"); render_metric(cols[1], '최종 자산',f"{x.total_value:,.0f}원"); render_metric(cols[2], '수익률',f"{x['return']*100:.2f}%"); render_metric(cols[3], 'MDD',f"{max_drawdown(curve.total_value)*100:.2f}%"); render_metric(cols[4], '전환',f'{len(switches)}회')
+    dated = curve.set_index(pd.to_datetime(curve.date))
+    increments = dated.total_contribution.diff().fillna(dated.total_contribution.iloc[0] - float(ctx['initial']))
+    details = performance_summary(dated.total_value, increments, float(ctx['initial']))
+    if not ctx['recurring']:
+        details.pop('적립식 XIRR', None)
+    render_metric_table({'달러 전략': details})
     st.altair_chart(alt.Chart(curve).mark_line().encode(x='date:T',y=alt.Y('total_value:Q',scale=alt.Scale(zero=False))).properties(height=420),use_container_width=True)
-    if not switches.empty: st.dataframe(switches,use_container_width=True,hide_index=True)
+    if not switches.empty: metric_dataframe(st, switches,use_container_width=True,hide_index=True)
     st.divider(); l,r=st.columns(2)
     with l:
-        if st.button('조건으로 돌아가기',key='back_f07_results',use_container_width=True): _goto('f07_conditions'); st.rerun()
+        if st.button('뒤로',key='back_f07_results',use_container_width=True): _goto('f07_conditions'); st.rerun()
     with r: st.download_button('결과 저장',_png(curve),'dollar-compass-result.png','image/png',key='download_f07_results',use_container_width=True)
 
 def _comparison():
