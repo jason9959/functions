@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import plotly.graph_objects as go
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 from .data_sources import DataSourceError, fetch_dart_companies, fetch_sec_companies, search_companies
 from .financials import BALANCE, CASH, INCOME, load_financials
 from .report_image import render_report
@@ -77,7 +78,7 @@ def chart_section(title, description, columns, frame, unit):
         fig.update_yaxes(zeroline=True, zerolinecolor="#8294B0", gridcolor="#EEF1F4")
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
         with st.expander("상세 수치 보기"):
-            st.dataframe(frame[columns].T, width="stretch")
+            metric_dataframe(st, frame[columns].T, width="stretch")
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -191,6 +192,8 @@ def render_results() -> None:
     company=result["company"]; quarterly=result["quarterly"]; frame=result["frame"]; unit=result["unit"]
     st.title("🏢 기업 재무 대시보드 결과")
     st.subheader(f"{company.name} · {company.symbol}")
+    if company.source == 'DART' and not company.symbol:
+        st.caption('종목코드가 없는 공시 기업입니다. DART에서 공시가 조회되더라도 이 앱이 사용하는 구조화 재무 API에는 해당 보고서가 없을 수 있습니다.')
     st.caption(f"{'분기별' if quarterly else '연도별'} · {frame.index[0]} ~ {frame.index[-1]} · {unit} · {company.source}")
     chart_section("01 재무상태","각 보고기간 말의 잔액을 비교합니다.",BALANCE,frame,unit)
     chart_section("02 손익","분기별 조회는 해당 분기 단독 실적, 연도별 조회는 연간 실적을 표시합니다.",INCOME,frame,unit)
@@ -198,6 +201,6 @@ def render_results() -> None:
     png=result_png(frame,company.name,"분기별" if quarterly else "연도별",unit)
     st.divider(); left,right=st.columns(2)
     with left:
-        if st.button("조건으로 돌아가기",key="back_f08_results",use_container_width=True): _goto("f08_conditions"); st.rerun()
+        if st.button('뒤로',key="back_f08_results",use_container_width=True): _goto("f08_conditions"); st.rerun()
     with right:
         st.download_button("결과 저장",data=png,file_name=f"{company.name}_재무요약.png",mime="image/png",key="download_f08_results",use_container_width=True)

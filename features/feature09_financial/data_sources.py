@@ -135,8 +135,6 @@ def fetch_dart_companies(api_key: str):
     companies = []
     for item in root.findall("list"):
         symbol = (item.findtext("stock_code") or "").strip()
-        if not symbol:
-            continue
         companies.append(Company(
             (item.findtext("corp_name") or "").strip(), symbol, "한국", "DART",
             (item.findtext("corp_code") or "").strip(),
