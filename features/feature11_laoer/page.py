@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import streamlit as st
+from common.metric_ui import metric as render_metric, metric_dataframe
 from .data_loader import load_ohlc
 from .backtest import run_v22
 from .charts import price_chart,value_chart,t_chart
@@ -53,16 +54,16 @@ def _results():
     st.title(f'♾️ {ticker} 무한매수법 V2.2 결과')
     st.caption(f"{ctx['start']} ~ {ctx['end']} · {ctx['divisions']}분할 · 거래비용 {ctx['fee']:.2f}%")
     cols=st.columns(6)
-    cols[0].metric('초기 투자금',f"{m['initial_capital']:,.0f}"); cols[1].metric('최종 자산',f"{m['final_value']:,.0f}"); cols[2].metric('총수익률',f"{m['return_pct']:.2f}%")
-    cols[3].metric('CAGR',f"{m['cagr_pct']:.2f}%"); cols[4].metric('MDD',f"{m['mdd_pct']:.2f}%"); cols[5].metric('완료 사이클',f"{m['completed_cycles']}회")
+    render_metric(cols[0], '초기 투자금',f"{m['initial_capital']:,.0f}"); render_metric(cols[1], '최종 자산',f"{m['final_value']:,.0f}"); render_metric(cols[2], '총수익률',f"{m['return_pct']:.2f}%")
+    render_metric(cols[3], 'CAGR',f"{m['cagr_pct']:.2f}%"); render_metric(cols[4], 'MDD',f"{m['mdd_pct']:.2f}%"); render_metric(cols[5], '완료 사이클',f"{m['completed_cycles']}회")
     st.plotly_chart(price_chart(daily,trades,ticker),use_container_width=True)
     st.plotly_chart(value_chart(daily),use_container_width=True)
     st.plotly_chart(t_chart(daily),use_container_width=True)
     st.subheader('거래 내역')
     if trades.empty: st.info('거래 내역이 없습니다.')
-    else: st.dataframe(trades,use_container_width=True,hide_index=True)
+    else: metric_dataframe(st, trades,use_container_width=True,hide_index=True)
     png=create_png(ticker,daily,m)
     st.divider(); left,right=st.columns(2)
     with left:
-        if st.button('조건으로 돌아가기',key='back_f10_results',use_container_width=True): _goto('f10_conditions'); st.rerun()
+        if st.button('뒤로',key='back_f10_results',use_container_width=True): _goto('f10_conditions'); st.rerun()
     with right: st.download_button('결과 저장',data=png,file_name=f'{ticker}-laoer-v22.png',mime='image/png',key='download_f10_results',use_container_width=True)
