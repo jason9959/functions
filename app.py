@@ -24,6 +24,8 @@ from features.feature08_dollar import page as feature08
 from features.feature09_financial import page as feature09
 from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
+from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
+from features.feature12_real_estate_vs_stock.monte_carlo import median_price_path
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
 from common.metric_ui import render_metric_table, metric_help
@@ -48,6 +50,7 @@ FEATURES = [
     {"id":"financial_dashboard","icon":"🏢","title":"9. 기업 재무 대시보드","description":"DART·SEC 공식 공시로 기업 재무상태·손익·현금흐름을 확인합니다."},
     {"id":"moving_average","icon":"📊","title":"10. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
     {"id":"laoer_infinite","icon":"♾️","title":"11. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
+    {"id":"real_estate_vs_stock","icon":"🏠","title":"12. 부동산 vs 주식 투자","description":"주택 매수와 월세·주식 적립 시나리오를 비교합니다."},
 ]
 
 
@@ -80,6 +83,7 @@ for key, default in {
     "monte_normal_result": None,
     "monte_bootstrap_result": None,
     "modal_error": None,
+    "real_estate_result": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -157,6 +161,7 @@ CONDITION_STATE_KEYS = {
     "f10": [
         "f10_ticker", "f10_start", "f10_end", "f10_capital", "f10_splits", "f10_fee", "f10_take_profit", "f10_quarter_stop",
     ],
+        "real_estate": ["real_estate_price", "real_estate_loan", "real_estate_rate", "real_estate_years", "real_estate_growth", "real_estate_repayment", "real_estate_rent", "real_estate_deposit", "real_estate_rent_growth_cycle", "real_estate_rent_growth", "real_estate_stock", "real_estate_path_method"],
 }
 
 RESULT_STATE_KEYS = {
@@ -1147,6 +1152,7 @@ def render_feature_page() -> None:
                 "financial_dashboard": "f08_conditions",
                 "moving_average": "f09_conditions",
                 "laoer_infinite": "f10_conditions",
+                "real_estate_vs_stock": "real_estate_conditions",
             }
             st.session_state["current_page"] = page_by_feature[feature["id"]]
             st.rerun()
@@ -2081,6 +2087,99 @@ def render_monte_carlo_results(method: str) -> None:
         )
 
 
+def render_real_estate_conditions() -> None:
+    st.title("🏠 부동산 vs 주식 투자")
+    st.markdown("<p class='step-caption'>부동산 매수와 월세·주식 적립 시나리오를 비교합니다.</p>", unsafe_allow_html=True)
+    render_condition_reset_button("real_estate")
+    left, right = st.columns(2)
+    with left:
+        price = st.number_input("매수가격", min_value=0.0, step=10_000_000.0, key="real_estate_price")
+        loan = st.number_input("대출금", min_value=0.0, step=10_000_000.0, key="real_estate_loan")
+        rate = st.number_input("대출이자율 (연 %)", min_value=0.0, step=0.1, key="real_estate_rate")
+        years = st.number_input("대출기간 (년)", min_value=1, max_value=50, step=1, key="real_estate_years")
+    with right:
+        repayment = st.selectbox("대출상환방식", ["원리금균등상환", "원금균등상환", "만기일시상환"], key="real_estate_repayment")
+        growth = st.number_input("부동산 연 상승률 (%)", step=0.1, key="real_estate_growth")
+        initial = max(float(price) - float(loan), 0.0)
+        st.number_input("초기자금 (자동 계산)", value=initial, disabled=True)
+        rent = st.number_input("월세", min_value=0.0, step=100_000.0, key="real_estate_rent")
+        deposit = st.number_input("보증금", min_value=0.0, step=1_000_000.0, key="real_estate_deposit")
+    rent_cycle = st.selectbox("월세 인상 주기", ["사용 안 함", "1년", "2년", "3년", "4년"], key="real_estate_rent_growth_cycle")
+    rent_growth = st.number_input("월세 상승률 (연 %)", min_value=0.0, step=0.1, disabled=rent_cycle == "사용 안 함", key="real_estate_rent_growth")
+    stock = st.selectbox("주식 종목", ["VOO", "QQQ"], key="real_estate_stock")
+    path_method = st.selectbox("주가 경로 생성 방식", ["Bootstrap", "정규분포"], key="real_estate_path_method", help="Bootstrap은 실제 과거 수익률을 재추출하고, 정규분포는 과거 평균과 변동성으로 경로를 생성합니다.")
+    back, run = st.columns(2)
+    if back.button("뒤로", use_container_width=True):
+        st.session_state["current_page"] = "feature"; st.rerun()
+    if run.button("결과 보기", type="primary", use_container_width=True):
+        if price <= 0 or loan < 0 or loan > price:
+            show_error_modal("매수가격은 대출금보다 커야 합니다."); return
+        try:
+            with st.spinner("주가 경로와 상환 계획을 계산하는 중이에요..."):
+                start = datetime.date.today() - datetime.timedelta(days=int(years * 365.25))
+                hist = download_adjusted_close((stock,), start.isoformat(), datetime.date.today().isoformat())[stock].dropna()
+                path, _ = median_price_path(hist, int(years), path_method)
+                monthly_payment = mortgage_payment(float(loan), float(rate), int(years), repayment)
+                months = int(years * 12)
+                rent_cycle_months = 0 if rent_cycle == "사용 안 함" else int(rent_cycle[0]) * 12
+                rent_values, stock_values, house_values, excess_cost = [], [], [], []
+                stock_value = max(initial - float(deposit), 0.0)
+                shortfall = max(float(deposit) - initial, 0.0)
+                house_balance = float(loan)
+                for month in range(months + 1):
+                    if month == 0:
+                        current_rent = float(rent)
+                    elif rent_cycle_months and month % rent_cycle_months == 0:
+                        current_rent *= 1 + float(rent_growth) / 100
+                    if month > 0:
+                        if repayment == "원금균등상환":
+                            principal = float(loan) / months
+                            interest = house_balance * float(rate) / 100 / 12
+                            payment = principal + interest
+                            house_balance = max(house_balance - principal, 0)
+                        elif repayment == "만기일시상환":
+                            payment = house_balance * float(rate) / 100 / 12
+                            house_balance = 0 if month == months else house_balance
+                        else:
+                            payment = monthly_payment
+                            r = float(rate) / 100 / 12
+                            principal = payment - house_balance * r
+                            house_balance = max(house_balance - principal, 0)
+                        net = max(payment - current_rent, 0.0)
+                        excess = max(current_rent - payment, 0.0)
+                        step = min(month * 21, len(path) - 1)
+                        stock_value *= path.iloc[step] / path.iloc[max(step - 21, 0)] if step else 1
+                        stock_value += net
+                        excess_cost.append(excess)
+                    rent_values.append(current_rent)
+                    stock_values.append(stock_value)
+                    house_values.append(float(price) * (1 + float(growth) / 100) ** (month / 12) - house_balance)
+                st.session_state["real_estate_result"] = {"stock": stock, "path_method": path_method, "path": path, "house_values": house_values, "stock_values": stock_values, "rent_values": rent_values, "excess_cost": excess_cost, "monthly_payment": monthly_payment, "initial": initial, "deposit": deposit, "shortfall": shortfall, "years": years, "price": price, "loan": loan, "growth": growth}
+                st.session_state["current_page"] = "real_estate_results"; st.rerun()
+        except Exception as error:
+            show_error_modal(f"부동산과 주식 비교를 계산하지 못했습니다: {error}")
+
+
+def render_real_estate_results() -> None:
+    result = st.session_state.get("real_estate_result")
+    if not result:
+        st.session_state["current_page"] = "real_estate_conditions"; st.rerun(); return
+    st.title("🏠 부동산 vs 주식 투자 결과")
+    months = np.arange(len(result["house_values"]))
+    figure, axis = plt.subplots(figsize=(12, 6))
+    axis.plot(months / 12, result["house_values"], label="부동산 순자산")
+    axis.plot(months / 12, result["stock_values"], label=f"{result['stock']} 주식 자산")
+    axis.set_xlabel("경과 기간 (년)"); axis.set_ylabel("금액"); axis.grid(alpha=0.2); axis.legend(); st.pyplot(figure); plt.close(figure)
+    final_house, final_stock = result["house_values"][-1], result["stock_values"][-1]
+    render_metric_table({"부동산 매수": {"최종 순자산": f"{final_house:,.0f}원", "월 원리금": f"{result['monthly_payment']:,.0f}원", "연 상승률": f"{result['growth']:.2f}%"}, f"월세 + {result['stock']}": {"최종 주식자산": f"{final_stock:,.0f}원", "보증금": f"{result['deposit']:,.0f}원", "최종 차이": f"{final_stock-final_house:+,.0f}원"}})
+    if result["shortfall"] > 0: st.warning(f"보증금이 초기자금보다 {result['shortfall']:,.0f}원 많아 추가 자금이 필요합니다.")
+    st.caption(f"주가 경로는 {result['path_method']} 방식으로 생성했으며, 최종값이 중앙값에 가장 가까운 경로를 사용했습니다.")
+    left, right = st.columns(2)
+    if left.button("뒤로", use_container_width=True): st.session_state["current_page"] = "real_estate_conditions"; st.rerun()
+    with right:
+        st.download_button("결과 저장", data=figure_to_png(figure), file_name="real-estate-vs-stock.png", mime="image/png", use_container_width=True)
+
+
 page_slot = st.empty()
 page_slot.empty()
 page = st.session_state["current_page"]
@@ -2123,6 +2222,10 @@ with page_slot.container():
         feature10.render(page)
     elif page.startswith("f10_"):
         feature11.render(page)
+    elif page == "real_estate_conditions":
+        render_real_estate_conditions()
+    elif page == "real_estate_results":
+        render_real_estate_results()
     else:
         st.session_state["current_page"] = "feature"
         st.rerun()
