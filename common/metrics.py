@@ -32,7 +32,8 @@ def cagr(values, periods_per_year: float = 252.0) -> float:
     v = pd.Series(values, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
     if len(v) < 2 or v.iloc[0] <= 0 or v.iloc[-1] <= 0:
         return float("nan")
-    years = (len(v) - 1) / periods_per_year
+    years = ((v.index[-1] - v.index[0]).total_seconds() / (365.2425 * 86400)
+             if isinstance(v.index, pd.DatetimeIndex) else (len(v) - 1) / periods_per_year)
     return float((v.iloc[-1] / v.iloc[0]) ** (1 / years) - 1) if years > 0 else float("nan")
 
 
@@ -40,6 +41,46 @@ def calmar_ratio(values, periods_per_year: float = 252.0) -> float:
     dd = abs(max_drawdown(values))
     annual = cagr(values, periods_per_year)
     return float(annual / dd) if dd > 0 and np.isfinite(annual) else float("nan")
+
+
+def mdd_recovery_days(values) -> float:
+    """Calendar days from the last pre-MDD high to recovery; NaN if unrecovered."""
+    v = pd.Series(values, dtype=float).dropna()
+    if v.empty or not isinstance(v.index, pd.DatetimeIndex):
+        return float("nan")
+    drawdown = v / v.cummax() - 1
+    if drawdown.min() >= 0:
+        return 0.0
+    trough = int(np.argmin(drawdown.to_numpy()))
+    peak_value = v.iloc[:trough + 1].max()
+    peak = np.flatnonzero(v.iloc[:trough + 1].to_numpy() == peak_value)[-1]
+    recovered = np.flatnonzero(v.iloc[trough:].to_numpy() >= peak_value)
+    return float((v.index[trough + recovered[0]] - v.index[peak]).days) if len(recovered) else float("nan")
+
+
+def performance_summary(values, contributions=None, initial_value=None) -> dict:
+    """Cash-flow-adjusted daily risk metrics; deposits occur at the day's close."""
+    v = pd.Series(values, dtype=float).dropna()
+    flows = pd.Series(0.0, index=v.index) if contributions is None else pd.Series(contributions).reindex(v.index).fillna(0.0)
+    returns = (v - flows) / v.shift(1) - 1
+    base = float(initial_value) if initial_value is not None else float(v.iloc[0] - flows.iloc[0])
+    nav = (1 + returns.fillna(0)).cumprod()
+    invested = base + float(flows.sum())
+    recovery = mdd_recovery_days(nav)
+    result = {
+        '최종 수익률': f'{(v.iloc[-1] / invested - 1):+.2%}',
+        '연환산 수익률': f'{cagr(nav):+.2%}',
+        '연환산 변동성': f'{returns.std(ddof=1) * np.sqrt(252):.2%}',
+        '최대 낙폭': f'{max_drawdown(nav):.2%}',
+        'MDD 회복기간(고점 기준)': '미회복' if pd.isna(recovery) else f'{recovery:.0f}일',
+        '샤프지수': sharpe_ratio(returns), 'Sortino': sortino_ratio(returns), 'Calmar': calmar_ratio(nav),
+    }
+    for key in ('샤프지수', 'Sortino', 'Calmar'):
+        result[key] = f'{result[key]:.2f}' if np.isfinite(result[key]) else '-'
+    if contributions is not None:
+        rate = cashflow_xirr(v.index, flows, v.iloc[-1], base)
+        result['적립식 XIRR'] = f'{rate:.2%}' if np.isfinite(rate) else '-'
+    return result
 
 
 def xirr(amounts, dates, guess: float = 0.1) -> float:
