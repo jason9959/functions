@@ -2118,6 +2118,8 @@ def render_real_estate_conditions() -> None:
         growth = st.number_input("부동산 연 상승률 (%)", step=0.1, key="real_estate_growth")
         initial = max(float(price) - float(loan), 0.0)
         st.number_input("초기자금 (자동 계산)", value=initial, disabled=True)
+        monthly_payment_preview = mortgage_payment(float(loan), float(rate), int(years), repayment)
+        st.number_input("월 원리금 (자동 계산)", value=float(monthly_payment_preview), disabled=True, step=10_000.0)
     st.divider()
     st.subheader("월세 + 주식 투자 조건")
     st.caption("월세와 보증금을 입력하고, 원리금과 월세의 차액을 선택한 ETF에 적립합니다.")
@@ -2126,6 +2128,13 @@ def render_real_estate_conditions() -> None:
         rent = st.number_input("월세", min_value=0.0, step=100_000.0, key="real_estate_rent")
     with deposit_col:
         deposit = st.number_input("보증금", min_value=0.0, step=1_000_000.0, key="real_estate_deposit")
+    calculated_col, stock_initial_col = st.columns(2)
+    with calculated_col:
+        monthly_saving_preview = max(float(monthly_payment_preview) - float(rent), 0.0)
+        st.number_input("월 주식 적립금 (자동 계산)", value=float(monthly_saving_preview), disabled=True, step=10_000.0)
+    with stock_initial_col:
+        stock_initial_preview = max(float(initial) - float(deposit), 0.0)
+        st.number_input("주식 초기 투자금 (자동 계산)", value=float(stock_initial_preview), disabled=True, step=10_000.0)
     rent_cycle = st.selectbox("월세 인상 주기", ["사용 안 함", "1년", "2년", "3년", "4년"], key="real_estate_rent_growth_cycle")
     rent_growth = st.number_input("월세 상승률 (연 %)", min_value=0.0, step=0.1, disabled=rent_cycle == "사용 안 함", key="real_estate_rent_growth")
     stock = st.selectbox("주식 종목", ["VOO", "QQQ"], key="real_estate_stock")
@@ -2188,13 +2197,47 @@ def render_real_estate_results() -> None:
     if not result:
         st.session_state["current_page"] = "real_estate_conditions"; st.rerun(); return
     st.title("🏠 부동산 vs 주식 투자 결과")
-    months = np.arange(len(result["house_values"]))
+    detail = pd.DataFrame({
+        "경과 월": np.arange(len(result["house_values"])),
+        "부동산 순자산": result["house_values"],
+        "주식 자산": result["stock_values"],
+        "월세": result["rent_values"],
+    })
+    months = detail["경과 월"].to_numpy()
     figure, axis = plt.subplots(figsize=(12, 6))
     stock_axis = axis.twinx()
-    house_line, = axis.plot(months / 12, result["house_values"], color="#F04452", linewidth=2, label="Real estate net equity")
-    stock_line, = stock_axis.plot(months / 12, result["stock_values"], color="#3182F6", linewidth=2, label=f"{result['stock']} investment")
-    axis.set_xlabel("Elapsed years"); axis.set_ylabel("Real estate net equity"); stock_axis.set_ylabel("Stock investment value")
-    axis.grid(alpha=0.2); axis.legend([house_line, stock_line], ["Real estate net equity", f"{result['stock']} investment"], loc="upper left")
+    house_line, = axis.plot(detail["경과 월"] / 12, detail["부동산 순자산"], color="#F04452", linewidth=2, label="부동산 순자산")
+    stock_line, = stock_axis.plot(detail["경과 월"] / 12, detail["주식 자산"], color="#3182F6", linewidth=2, label=f"{result['stock']} 주식자산")
+    from matplotlib.ticker import FuncFormatter
+    won_formatter = FuncFormatter(lambda value, _: f"{value:,.0f}원")
+    axis.set_xlabel("Elapsed years")
+    axis.set_ylabel("부동산 순자산 (원)")
+    stock_axis.set_ylabel(f"{result['stock']} 주식자산 (원)")
+    axis.yaxis.set_major_formatter(won_formatter)
+    stock_axis.yaxis.set_major_formatter(won_formatter)
+    # 두 Y축은 금액 단위가 다를 수 있지만, 0개월의 시작값은 같은 화면 기준점에 놓는다.
+    def align_start(values, start_fraction=0.10):
+        values = np.asarray(values, dtype=float)
+        low, high, start_value = float(np.min(values)), float(np.max(values)), float(values[0])
+        span = max(high - low, abs(high - start_value), abs(start_value - low), 1.0)
+        lower = start_value - span * start_fraction
+        upper = lower + span
+        return lower, upper
+    axis.set_ylim(*align_start(detail["부동산 순자산"]))
+    stock_axis.set_ylim(*align_start(detail["주식 자산"]))
+    axis.grid(alpha=0.2)
+    axis.legend([house_line, stock_line], ["부동산 순자산", f"{result['stock']} 주식자산"], loc="upper left")
+    axis.annotate(f"{detail['부동산 순자산'].iloc[0]:,.0f}원", (0, detail['부동산 순자산'].iloc[0]), xytext=(8, 8), textcoords="offset points", fontsize=9, color="#F04452")
+    stock_axis.annotate(f"{detail['주식 자산'].iloc[0]:,.0f}원", (0, detail['주식 자산'].iloc[0]), xytext=(8, -18), textcoords="offset points", fontsize=9, color="#3182F6")
+    end_x = float(detail['경과 월'].iloc[-1] / 12)
+    end_house = float(detail['부동산 순자산'].iloc[-1])
+    end_stock = float(detail['주식 자산'].iloc[-1])
+    axis.scatter([end_x], [end_house], color="#F04452", s=24, zorder=5)
+    stock_axis.scatter([end_x], [end_stock], color="#3182F6", s=24, zorder=5)
+    axis.annotate(f"종료 {end_house:,.0f}원", (end_x, end_house), xytext=(-12, 10), textcoords="offset points", ha="right", fontsize=9, color="#F04452")
+    stock_axis.annotate(f"종료 {end_stock:,.0f}원", (end_x, end_stock), xytext=(-12, -20), textcoords="offset points", ha="right", fontsize=9, color="#3182F6")
+    axis.axhline(float(detail['부동산 순자산'].iloc[0]), color="#F04452", linestyle=":", linewidth=0.8, alpha=0.35)
+    stock_axis.axhline(float(detail['주식 자산'].iloc[0]), color="#3182F6", linestyle=":", linewidth=0.8, alpha=0.35)
     st.pyplot(figure)
     report_png = figure_to_png(figure)
     plt.close(figure)
@@ -2207,7 +2250,6 @@ def render_real_estate_results() -> None:
     st.subheader(f"월세 + {result['stock']} 결과")
     render_metric_table({"월세 + 주식": {"최종 주식자산": f"{final_stock:,.0f}원", "보증금": f"{result['deposit']:,.0f}원", "누적 월세": f"{sum(result['rent_values']):,.0f}원", "월세 초과 비용": f"{sum(result['excess_cost']):,.0f}원", "최종 차이": f"{final_stock-final_house:+,.0f}원"}})
     with st.expander("자산가격 변화 상세 보기"):
-        detail = pd.DataFrame({"경과 월": months, "부동산 순자산": result['house_values'], "주식 자산": result['stock_values'], "월세": result['rent_values']})
         metric_dataframe(st, detail, hide_index=True, width="stretch")
     if result["shortfall"] > 0: st.warning(f"보증금이 초기자금보다 {result['shortfall']:,.0f}원 많아 추가 자금이 필요합니다.")
     st.caption(f"주가 경로는 {result['path_method']} 방식으로 생성했으며, 최종값이 중앙값에 가장 가까운 경로를 사용했습니다.")
