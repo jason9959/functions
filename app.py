@@ -161,7 +161,7 @@ CONDITION_STATE_KEYS = {
     "f10": [
         "f10_ticker", "f10_start", "f10_end", "f10_capital", "f10_splits", "f10_fee", "f10_take_profit", "f10_quarter_stop",
     ],
-        "real_estate": ["real_estate_price", "real_estate_loan", "real_estate_rate", "real_estate_years", "real_estate_growth", "real_estate_repayment", "real_estate_rent", "real_estate_deposit", "real_estate_rent_growth_cycle", "real_estate_rent_growth", "real_estate_stock", "real_estate_path_method"],
+        "real_estate": ["real_estate_price", "real_estate_loan", "real_estate_rate", "real_estate_years", "real_estate_backtest_years", "real_estate_growth", "real_estate_repayment", "real_estate_rent", "real_estate_deposit", "real_estate_rent_growth_cycle", "real_estate_rent_growth", "real_estate_stock", "real_estate_path_method"],
 }
 
 RESULT_STATE_KEYS = {
@@ -2113,6 +2113,7 @@ def render_real_estate_conditions() -> None:
         loan = st.number_input("대출금", min_value=0.0, step=10_000_000.0, key="real_estate_loan")
         rate = st.number_input("대출이자율 (연 %)", min_value=0.0, step=0.1, key="real_estate_rate")
         years = st.number_input("대출기간 (년)", min_value=1, max_value=50, step=1, key="real_estate_years")
+        backtest_years = st.number_input("백테스팅 기간 (년)", min_value=1, max_value=50, step=1, key="real_estate_backtest_years")
     with right:
         repayment = st.selectbox("대출상환방식", ["원리금균등상환", "원금균등상환", "만기일시상환"], key="real_estate_repayment")
         growth = st.number_input("부동산 연 상승률 (%)", step=0.1, key="real_estate_growth")
@@ -2147,11 +2148,11 @@ def render_real_estate_conditions() -> None:
             show_error_modal("매수가격은 대출금보다 커야 합니다."); return
         try:
             with st.spinner("주가 경로와 상환 계획을 계산하는 중이에요..."):
-                start = datetime.date.today() - datetime.timedelta(days=int(years * 365.25))
+                start = datetime.date.today() - datetime.timedelta(days=int(backtest_years * 365.25))
                 hist = download_adjusted_close((stock,), start.isoformat(), datetime.date.today().isoformat())[stock].dropna()
-                path, _ = median_price_path(hist, int(years), path_method)
+                path, _ = median_price_path(hist, int(backtest_years), path_method)
                 monthly_payment = mortgage_payment(float(loan), float(rate), int(years), repayment)
-                months = int(years * 12)
+                months = int(backtest_years * 12)
                 rent_cycle_months = 0 if rent_cycle == "사용 안 함" else int(rent_cycle[0]) * 12
                 rent_values, stock_values, house_values, loan_balances, excess_cost = [], [], [], [], []
                 stock_value = max(initial - float(deposit), 0.0)
@@ -2164,13 +2165,13 @@ def render_real_estate_conditions() -> None:
                         current_rent *= 1 + float(rent_growth) / 100
                     if month > 0:
                         if repayment == "원금균등상환":
-                            principal = float(loan) / months
+                            principal = float(loan) / max(int(years * 12), 1)
                             interest = house_balance * float(rate) / 100 / 12
                             payment = principal + interest
                             house_balance = max(house_balance - principal, 0)
                         elif repayment == "만기일시상환":
                             payment = house_balance * float(rate) / 100 / 12
-                            house_balance = 0 if month == months else house_balance
+                            house_balance = 0 if month >= int(years * 12) else house_balance
                         else:
                             payment = monthly_payment
                             r = float(rate) / 100 / 12
@@ -2186,7 +2187,7 @@ def render_real_estate_conditions() -> None:
                     stock_values.append(stock_value)
                     house_values.append(float(price) * (1 + float(growth) / 100) ** (month / 12) - house_balance)
                     loan_balances.append(house_balance)
-                st.session_state["real_estate_result"] = {"stock": stock, "path_method": path_method, "path": path, "house_values": house_values, "stock_values": stock_values, "rent_values": rent_values, "loan_balance": loan_balances, "excess_cost": excess_cost, "monthly_payment": monthly_payment, "initial": initial, "deposit": deposit, "shortfall": shortfall, "years": years, "price": price, "loan": loan, "growth": growth, "repayment": repayment}
+                st.session_state["real_estate_result"] = {"stock": stock, "path_method": path_method, "path": path, "house_values": house_values, "stock_values": stock_values, "rent_values": rent_values, "loan_balance": loan_balances, "excess_cost": excess_cost, "monthly_payment": monthly_payment, "initial": initial, "deposit": deposit, "shortfall": shortfall, "loan_years": years, "backtest_years": backtest_years, "price": price, "loan": loan, "growth": growth, "repayment": repayment}
                 st.session_state["current_page"] = "real_estate_results"; st.rerun()
         except Exception as error:
             show_error_modal(f"부동산과 주식 비교를 계산하지 못했습니다: {error}")
@@ -2205,45 +2206,30 @@ def render_real_estate_results() -> None:
     })
     months = detail["경과 월"].to_numpy()
     figure, axis = plt.subplots(figsize=(12, 6))
-    stock_axis = axis.twinx()
-    house_line, = axis.plot(detail["경과 월"] / 12, detail["부동산 순자산"], color="#F04452", linewidth=2, label="부동산 순자산")
-    stock_line, = stock_axis.plot(detail["경과 월"] / 12, detail["주식 자산"], color="#3182F6", linewidth=2, label=f"{result['stock']} 주식자산")
+    house_line, = axis.plot(detail["경과 월"] / 12, detail["부동산 순자산"], color="#F04452", linewidth=2, label="Real estate net equity")
+    stock_line, = axis.plot(detail["경과 월"] / 12, detail["주식 자산"], color="#3182F6", linewidth=2, label=f"{result['stock']} investment")
     from matplotlib.ticker import FuncFormatter
-    won_formatter = FuncFormatter(lambda value, _: f"{value:,.0f}원")
+    axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f} KRW"))
     axis.set_xlabel("Elapsed years")
-    axis.set_ylabel("부동산 순자산 (원)")
-    stock_axis.set_ylabel(f"{result['stock']} 주식자산 (원)")
-    axis.yaxis.set_major_formatter(won_formatter)
-    stock_axis.yaxis.set_major_formatter(won_formatter)
-    # 두 Y축은 금액 단위가 다를 수 있지만, 0개월의 시작값은 같은 화면 기준점에 놓는다.
-    def align_start(values, start_fraction=0.10):
-        values = np.asarray(values, dtype=float)
-        low, high, start_value = float(np.min(values)), float(np.max(values)), float(values[0])
-        span = max(high - low, abs(high - start_value), abs(start_value - low), 1.0)
-        lower = start_value - span * start_fraction
-        upper = lower + span
-        return lower, upper
-    axis.set_ylim(*align_start(detail["부동산 순자산"]))
-    stock_axis.set_ylim(*align_start(detail["주식 자산"]))
+    axis.set_ylabel("Asset value (KRW)")
     axis.grid(alpha=0.2)
-    axis.legend([house_line, stock_line], ["부동산 순자산", f"{result['stock']} 주식자산"], loc="upper left")
-    axis.annotate(f"{detail['부동산 순자산'].iloc[0]:,.0f}원", (0, detail['부동산 순자산'].iloc[0]), xytext=(8, 8), textcoords="offset points", fontsize=9, color="#F04452")
-    stock_axis.annotate(f"{detail['주식 자산'].iloc[0]:,.0f}원", (0, detail['주식 자산'].iloc[0]), xytext=(8, -18), textcoords="offset points", fontsize=9, color="#3182F6")
+    axis.legend([house_line, stock_line], ["Real estate net equity", f"{result['stock']} investment"], loc="upper left")
+    axis.annotate(f"Start {detail['부동산 순자산'].iloc[0]:,.0f} KRW", (0, detail['부동산 순자산'].iloc[0]), xytext=(8, 8), textcoords="offset points", fontsize=9, color="#F04452")
+    axis.annotate(f"Start {detail['주식 자산'].iloc[0]:,.0f} KRW", (0, detail['주식 자산'].iloc[0]), xytext=(8, -18), textcoords="offset points", fontsize=9, color="#3182F6")
     end_x = float(detail['경과 월'].iloc[-1] / 12)
     end_house = float(detail['부동산 순자산'].iloc[-1])
     end_stock = float(detail['주식 자산'].iloc[-1])
     axis.scatter([end_x], [end_house], color="#F04452", s=24, zorder=5)
-    stock_axis.scatter([end_x], [end_stock], color="#3182F6", s=24, zorder=5)
-    axis.annotate(f"종료 {end_house:,.0f}원", (end_x, end_house), xytext=(-12, 10), textcoords="offset points", ha="right", fontsize=9, color="#F04452")
-    stock_axis.annotate(f"종료 {end_stock:,.0f}원", (end_x, end_stock), xytext=(-12, -20), textcoords="offset points", ha="right", fontsize=9, color="#3182F6")
-    axis.axhline(float(detail['부동산 순자산'].iloc[0]), color="#F04452", linestyle=":", linewidth=0.8, alpha=0.35)
-    stock_axis.axhline(float(detail['주식 자산'].iloc[0]), color="#3182F6", linestyle=":", linewidth=0.8, alpha=0.35)
+    axis.scatter([end_x], [end_stock], color="#3182F6", s=24, zorder=5)
+    axis.annotate(f"End {end_house:,.0f} KRW", (end_x, end_house), xytext=(-12, 10), textcoords="offset points", ha="right", fontsize=9, color="#F04452")
+    axis.annotate(f"End {end_stock:,.0f} KRW", (end_x, end_stock), xytext=(-12, -20), textcoords="offset points", ha="right", fontsize=9, color="#3182F6")
+    axis.annotate(f"End {end_house:,.0f} KRW", (end_x, end_house), xytext=(-12, 10), textcoords="offset points", ha="right", fontsize=9, color="#F04452")
     st.pyplot(figure)
     report_png = figure_to_png(figure)
     plt.close(figure)
     final_house, final_stock = result["house_values"][-1], result["stock_values"][-1]
     st.subheader("입력 조건")
-    condition_table = pd.DataFrame({"항목": ["매수가격", "대출금", "초기자금", "대출기간", "대출상환방식", "주식 종목", "경로 생성 방식", "보증금", "월 원리금"], "값": [f"{result['price']:,.0f}원", f"{result['loan']:,.0f}원", f"{result['initial']:,.0f}원", f"{result['years']}년", result.get('repayment', '-'), result['stock'], result['path_method'], f"{result['deposit']:,.0f}원", f"{result['monthly_payment']:,.0f}원"]})
+    condition_table = pd.DataFrame({"항목": ["매수가격", "대출금", "초기자금", "대출기간", "백테스팅 기간", "대출상환방식", "주식 종목", "경로 생성 방식", "보증금", "월 원리금"], "값": [f"{result['price']:,.0f}원", f"{result['loan']:,.0f}원", f"{result['initial']:,.0f}원", f"{result['loan_years']}년", f"{result['backtest_years']}년", result.get('repayment', '-'), result['stock'], result['path_method'], f"{result['deposit']:,.0f}원", f"{result['monthly_payment']:,.0f}원"]})
     metric_dataframe(st, condition_table, hide_index=True, width="stretch")
     st.subheader("부동산 매수 결과")
     render_metric_table({"부동산": {"최종 순자산": f"{final_house:,.0f}원", "최종 부동산 가치": f"{result['house_values'][-1] + result['loan_balance'][-1]:,.0f}원", "남은 대출금": f"{result['loan_balance'][-1]:,.0f}원", "월 원리금": f"{result['monthly_payment']:,.0f}원"}})
