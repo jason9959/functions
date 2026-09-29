@@ -87,8 +87,13 @@ def render_metric_table(columns, heading='지표'):
     headers = ''.join('<th scope="col">' + html.escape(str(c)) + '</th>' for c in frame.columns)
     st.markdown('''<style>
     .metric-scroll{max-width:100%;overflow:auto;padding-bottom:1rem}
-    .metric-table{border-collapse:collapse;width:100%;font-size:.95rem}
-    .metric-table th,.metric-table td{padding:.65rem;border-bottom:1px solid #aaa5;text-align:right;vertical-align:top}
+    .metric-table{border-collapse:separate;border-spacing:0;width:100%;font-size:.95rem;border:1px solid #d9dde3;border-radius:8px;overflow:hidden;background:#fff}
+    .metric-table th,.metric-table td{padding:.7rem .8rem;border-bottom:1px solid #e5e8eb;text-align:right;vertical-align:top}
+    .metric-table thead th{background:#eeeeee;color:#4e5968;font-weight:700;border-bottom:1px solid #d9dde3}
+    .metric-table tbody tr:nth-child(odd){background:#fafafa}
+    .metric-table tbody tr:nth-child(even){background:#f5f6f7}
+    .metric-table tbody tr:last-child th,.metric-table tbody tr:last-child td{border-bottom:0}
+    .metric-table tbody th{color:#333d4b;font-weight:600}
     .metric-table th:first-child{text-align:left;min-width:180px}
     .metric-tip summary{cursor:pointer;list-style:none}
     .metric-tip span{display:none;max-width:360px;white-space:normal;font-weight:normal;padding:.6rem;border:1px solid #8886;border-radius:8px}
@@ -105,6 +110,15 @@ def explain_metrics(labels):
 def metric_dataframe(target, data=None, *args, **kwargs):
     """Attach column-header help; a tap-open glossary also covers row labels."""
     frame = data if isinstance(data, pd.DataFrame) else getattr(data, 'data', None)
+    if isinstance(frame, pd.DataFrame):
+        # Keep calculation indices intact while presenting dates without a midnight time.
+        frame = frame.copy()
+        if isinstance(frame.index, pd.DatetimeIndex):
+            frame.index = frame.index.strftime('%Y-%m-%d')
+        for column in frame.columns:
+            if pd.api.types.is_datetime64_any_dtype(frame[column]):
+                frame[column] = frame[column].dt.strftime('%Y-%m-%d')
+        data = frame
     if isinstance(frame, pd.DataFrame):
         config = dict(kwargs.get('column_config') or {})
         for column in frame.columns:
