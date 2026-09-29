@@ -1,5 +1,6 @@
 """Shared metric explanations and accessible comparison tables."""
 import html
+import io
 import pandas as pd
 import streamlit as st
 
@@ -130,3 +131,33 @@ def metric_dataframe(target, data=None, *args, **kwargs):
     if isinstance(frame, pd.DataFrame):
         explain_metrics(list(frame.columns) + list(frame.index))
     return result
+
+def table_download_bytes(tables):
+    """Return CSV and Excel payloads for named display tables.
+
+    ``tables`` is an ordered mapping of sheet/table names to DataFrames.
+    Display-only date formatting is applied without mutating source frames.
+    """
+    prepared = {}
+    for name, data in tables.items():
+        frame = data.copy()
+        if isinstance(frame.index, pd.DatetimeIndex):
+            frame.index = frame.index.strftime('%Y-%m-%d')
+        for column in frame.columns:
+            if pd.api.types.is_datetime64_any_dtype(frame[column]):
+                frame[column] = frame[column].dt.strftime('%Y-%m-%d')
+        prepared[str(name)[:31]] = frame
+    csv_data = next(iter(prepared.values())).to_csv(index=True).encode('utf-8-sig') if len(prepared) == 1 else None
+    workbook = io.BytesIO()
+    with pd.ExcelWriter(workbook, engine='openpyxl') as writer:
+        for name, frame in prepared.items():
+            frame.to_excel(writer, sheet_name=name, index=True)
+    return csv_data, workbook.getvalue()
+
+def render_table_downloads(tables, stem, key_prefix):
+    """Render consistent CSV/Excel download buttons for result tables."""
+    csv_data, excel_data = table_download_bytes(tables)
+    left, right = st.columns(2)
+    if csv_data is not None:
+        left.download_button('CSV 다운로드', csv_data, f'{stem}.csv', 'text/csv', key=f'{key_prefix}_csv', use_container_width=True)
+    right.download_button('Excel 다운로드', excel_data, f'{stem}.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key=f'{key_prefix}_excel', use_container_width=True)

@@ -1302,6 +1302,13 @@ def render_return_comparison_results() -> None:
         dated_prices.index = dated_prices.index.strftime('%Y-%m-%d')
         metric_dataframe(st, dated_prices, use_container_width=True)
 
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        dated_prices.to_excel(writer, sheet_name="원본 가격", index_label="날짜")
+        summary = pd.DataFrame({ticker: performance_summary(prices[ticker]) for ticker in result["tickers"]}).T
+        summary.to_excel(writer, sheet_name="수익률 요약", index_label="종목")
+    excel_data = excel_buffer.getvalue()
+
     report_image = build_comparison_report_image(result)
     input_col, save_col = st.columns(2)
     with input_col:
@@ -1323,6 +1330,14 @@ def render_return_comparison_results() -> None:
             key="download_comparison_report",
             use_container_width=True,
         )
+    st.download_button(
+        "Excel 다운로드",
+        data=excel_data,
+        file_name=f"relative-return-{common_start:%Y%m%d}-{common_end:%Y%m%d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_comparison_excel",
+        use_container_width=True,
+    )
 
 
 def render_periodic_return_conditions() -> None:

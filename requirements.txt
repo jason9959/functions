@@ -7,3 +7,4 @@ altair>=5.0
 plotly>=5.20
 requests>=2.31
 python-dateutil>=2.9
+openpyxl>=3.1
