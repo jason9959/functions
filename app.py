@@ -17,6 +17,7 @@ import yfinance as yf
 from features.feature01_comparison import page as feature01
 from features.feature02_periodic_returns import page as feature02
 from features.feature03_portfolio import page as feature03
+from features.feature04_allocation_sweep import page as feature04_allocation
 from features.feature04_monte_carlo_normal import page as feature04
 from features.feature05_monte_carlo_bootstrap import page as feature05
 from features.feature07_inflation import page as feature07
@@ -26,6 +27,7 @@ from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
 from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
 from features.feature12_real_estate_vs_stock.monte_carlo import median_price_path
+from features.feature12_real_estate_vs_stock import page as feature12_real_estate
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
 from common.metric_ui import render_metric_table, metric_help
@@ -231,6 +233,21 @@ st.markdown(
     .st-key-real_estate_run button p,
     .st-key-real_estate_result_back button p,
     .st-key-real_estate_result_save button p { text-align: center !important; }
+    .st-key-real_estate_back button,
+    .st-key-real_estate_run button,
+    .st-key-real_estate_result_back button,
+    .st-key-real_estate_result_save button {
+        min-height: 44px !important;
+        width: 100% !important;
+    }
+    .st-key-real_estate_back button p,
+    .st-key-real_estate_run button p,
+    .st-key-real_estate_result_back button p,
+    .st-key-real_estate_result_save button p {
+        width: 100% !important;
+        margin: 0 !important;
+        text-align: center !important;
+    }
     [data-testid="stDialog"] [data-testid="stButton"] button,
     [data-testid="stDialog"] [data-testid="stButton"] button > div { justify-content: center !important; text-align: center !important; }
     div[data-testid="stButton"] > button p strong {
@@ -2276,10 +2293,7 @@ with page_slot.container():
     elif page.startswith("portfolio_"):
         feature03.render(page, render_portfolio_conditions, render_portfolio_results)
     elif page.startswith("allocation_"):
-        if page == "allocation_conditions":
-            render_allocation_conditions()
-        else:
-            render_allocation_results()
+        feature04_allocation.render(page, render_allocation_conditions, render_allocation_results)
     elif page.startswith("monte_normal_"):
         feature04.render(
             page,
@@ -2302,11 +2316,14 @@ with page_slot.container():
         feature10.render(page)
     elif page.startswith("f10_"):
         feature11.render(page)
-    elif page == "real_estate_conditions":
-        render_real_estate_conditions()
-    elif page == "real_estate_results":
-        render_real_estate_results()
+    elif page.startswith("real_estate_"):
+        feature12_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
     else:
+        st.session_state["current_page"] = "feature"
+        st.rerun()
+
+if page != "feature":
+    if st.button("기능선택 화면으로 이동", key="global_go_feature", use_container_width=True):
         st.session_state["current_page"] = "feature"
         st.rerun()
 
