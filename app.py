@@ -18,8 +18,8 @@ from features.feature01_comparison import page as feature01
 from features.feature02_periodic_returns import page as feature02
 from features.feature03_portfolio import page as feature03
 from features.feature04_allocation_sweep import page as feature04_allocation
-from features.feature04_monte_carlo_normal import page as feature04
-from features.feature05_monte_carlo_bootstrap import page as feature05
+from features.feature05_monte_carlo_normal import page as feature05
+from features.feature06_monte_carlo_bootstrap import page as feature06
 from features.feature07_inflation import page as feature07
 from features.feature08_dollar import page as feature08
 from features.feature09_financial import page as feature09
@@ -2295,13 +2295,13 @@ with page_slot.container():
     elif page.startswith("allocation_"):
         feature04_allocation.render(page, render_allocation_conditions, render_allocation_results)
     elif page.startswith("monte_normal_"):
-        feature04.render(
+        feature05.render(
             page,
             lambda: render_monte_carlo_conditions("normal"),
             lambda: render_monte_carlo_results("normal"),
         )
     elif page.startswith("monte_bootstrap_"):
-        feature05.render(
+        feature06.render(
             page,
             lambda: render_monte_carlo_conditions("bootstrap"),
             lambda: render_monte_carlo_results("bootstrap"),
