@@ -26,7 +26,7 @@ from features.feature09_financial import page as feature09
 from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
 from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
-from features.feature12_real_estate_vs_stock.monte_carlo import median_price_path
+from features.feature12_real_estate_vs_stock.monte_carlo import historical_price_path, median_price_path
 from features.feature12_real_estate_vs_stock import page as feature12_real_estate
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
@@ -264,12 +264,20 @@ st.markdown(
         border-color: #F58220 !important;
         color: #F58220 !important;
     }
+    .st-key-global_go_feature button {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
     .st-key-back_to_feature button p,
     .st-key-real_estate_back button p,
     .st-key-global_go_feature button p {
         color: #F58220 !important;
         font-weight: 600;
         text-align: center !important;
+    }
+    .st-key-global_go_feature button p {
+        font-weight: 700 !important;
     }
     .st-key-back_to_feature button > div,
     .st-key-real_estate_back button > div,
@@ -2186,7 +2194,12 @@ def render_real_estate_conditions() -> None:
     rent_cycle = st.selectbox("월세 인상 주기", ["사용 안 함", "1년", "2년", "3년", "4년"], key="real_estate_rent_growth_cycle")
     rent_growth = st.number_input("월세 상승률 (연 %)", min_value=0.0, step=0.1, disabled=rent_cycle == "사용 안 함", key="real_estate_rent_growth")
     stock = st.selectbox("주식 종목", ["VOO", "QQQ"], key="real_estate_stock")
-    path_method = st.selectbox("주가 경로 생성 방식", ["Bootstrap", "정규분포"], key="real_estate_path_method", help="Bootstrap은 실제 과거 수익률을 재추출하고, 정규분포는 과거 평균과 변동성으로 경로를 생성합니다.")
+    path_method = st.selectbox(
+        "주가 경로 생성 방식",
+        ["기존 주가 이용", "Bootstrap", "정규분포"],
+        key="real_estate_path_method",
+        help="기존 주가 이용은 조회 기간의 실제 조정주가 흐름을 그대로 사용합니다. Bootstrap과 정규분포는 과거 수익률로 미래 경로를 생성합니다.",
+    )
     backtest_years = st.number_input(
         "백테스팅 기간 (년)",
         min_value=1,
@@ -2206,7 +2219,10 @@ def render_real_estate_conditions() -> None:
                 end = pd.Timestamp.today().normalize()
                 start = end - pd.DateOffset(years=int(backtest_years))
                 hist = download_adjusted_close((stock,), start.date().isoformat(), end.date().isoformat())[stock].dropna()
-                path, _ = median_price_path(hist, int(backtest_years), path_method)
+                if path_method == "기존 주가 이용":
+                    path = historical_price_path(hist, int(backtest_years))
+                else:
+                    path, _ = median_price_path(hist, int(backtest_years), path_method)
                 monthly_payment = mortgage_payment(float(loan), float(rate), int(years), repayment)
                 months = int(backtest_years * 12)
                 rent_cycle_months = 0 if rent_cycle == "사용 안 함" else int(rent_cycle[0]) * 12
@@ -2294,7 +2310,10 @@ def render_real_estate_results() -> None:
     with st.expander("자산가격 변화 상세 보기"):
         metric_dataframe(st, detail, hide_index=True, width="stretch")
     if result["shortfall"] > 0: st.warning(f"보증금이 초기자금보다 {result['shortfall']:,.0f}원 많아 추가 자금이 필요합니다.")
-    st.caption(f"주가 경로는 {result['path_method']} 방식으로 생성했으며, 최종값이 중앙값에 가장 가까운 경로를 사용했습니다.")
+    if result['path_method'] == "기존 주가 이용":
+        st.caption("입력한 백테스팅 기간의 실제 조정주가 경로를 사용했습니다.")
+    else:
+        st.caption(f"주가 경로는 {result['path_method']} 방식으로 생성했으며, 최종값이 중앙값에 가장 가까운 경로를 사용했습니다.")
     left, right = st.columns(2)
     if left.button("뒤로", key="real_estate_result_back", use_container_width=True): st.session_state["current_page"] = "real_estate_conditions"; st.rerun()
     with right:

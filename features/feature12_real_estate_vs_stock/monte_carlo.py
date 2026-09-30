@@ -4,6 +4,21 @@ import numpy as np
 import pandas as pd
 
 
+def historical_price_path(prices: pd.Series, horizon_years: int) -> pd.Series:
+    """Return the observed adjusted-price path for the requested horizon."""
+    clean = prices.dropna().sort_index()
+    if len(clean) < 2:
+        raise ValueError("기존 주가 경로를 만들 데이터가 부족합니다.")
+    observed_days = (clean.index[-1] - clean.index[0]).days
+    required_days = max(int(horizon_years * 365.25) - 10, 1)
+    if observed_days < required_days:
+        raise ValueError(
+            f"요청한 {horizon_years}년보다 실제 주가 이력이 짧습니다. "
+            f"사용 가능한 기간은 약 {observed_days / 365.25:.1f}년입니다. 기간을 줄여주세요."
+        )
+    return clean.copy()
+
+
 def median_price_path(
     prices: pd.Series,
     horizon_years: int,
