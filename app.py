@@ -224,15 +224,18 @@ st.markdown(
     .st-key-real_estate_back button,
     .st-key-real_estate_run button,
     .st-key-real_estate_result_back button,
-    .st-key-real_estate_result_save button { justify-content: center !important; text-align: center !important; }
+    .st-key-real_estate_result_save button,
+    .st-key-global_go_feature button { justify-content: center !important; text-align: center !important; }
     .st-key-real_estate_back button > div,
     .st-key-real_estate_run button > div,
     .st-key-real_estate_result_back button > div,
-    .st-key-real_estate_result_save button > div { justify-content: center !important; }
+    .st-key-real_estate_result_save button > div,
+    .st-key-global_go_feature button > div { justify-content: center !important; }
     .st-key-real_estate_back button p,
     .st-key-real_estate_run button p,
     .st-key-real_estate_result_back button p,
-    .st-key-real_estate_result_save button p { text-align: center !important; }
+    .st-key-real_estate_result_save button p,
+    .st-key-global_go_feature button p { text-align: center !important; }
     .st-key-real_estate_back button,
     .st-key-real_estate_run button,
     .st-key-real_estate_result_back button,
@@ -254,26 +257,36 @@ st.markdown(
         font-size: 22px;
         font-weight: 700;
     }
-    .st-key-back_to_feature button {
+    .st-key-back_to_feature button,
+    .st-key-real_estate_back button,
+    .st-key-global_go_feature button {
         background: #FFFFFF !important;
         border-color: #F58220 !important;
         color: #F58220 !important;
     }
-    .st-key-back_to_feature button p {
+    .st-key-back_to_feature button p,
+    .st-key-real_estate_back button p,
+    .st-key-global_go_feature button p {
         color: #F58220 !important;
         font-weight: 600;
         text-align: center !important;
     }
     .st-key-back_to_feature button > div,
+    .st-key-real_estate_back button > div,
+    .st-key-global_go_feature button > div,
     .st-key-show_comparison_result button > div,
+    .st-key-real_estate_run button > div,
     div[class*="st-key-run_"] button > div {
         justify-content: center !important;
     }
     .st-key-show_comparison_result button p,
+    .st-key-real_estate_run button p,
     div[class*="st-key-run_"] button p {
         text-align: center !important;
     }
-    .st-key-back_to_feature button:hover {
+    .st-key-back_to_feature button:hover,
+    .st-key-real_estate_back button:hover,
+    .st-key-global_go_feature button:hover {
         background: #FFF7ED !important;
         border-color: #E66F00 !important;
     }
@@ -338,6 +351,7 @@ st.markdown(
         text-align: center !important;
     }
     .st-key-show_comparison_result button,
+    .st-key-real_estate_run button,
     div[class*="st-key-run_"] button {
         min-height: 0;
         padding: 16px 28px;
@@ -347,6 +361,7 @@ st.markdown(
         color: #FFFFFF !important;
     }
     .st-key-show_comparison_result button p,
+    .st-key-real_estate_run button p,
     div[class*="st-key-run_"] button p {
         color: #FFFFFF !important;
         font-size: 16px;
@@ -354,6 +369,7 @@ st.markdown(
         text-align: center !important;
     }
     .st-key-show_comparison_result button:hover,
+    .st-key-real_estate_run button:hover,
     div[class*="st-key-run_"] button:hover {
         background: #E83E3E !important;
         border-color: #E83E3E !important;
@@ -2145,7 +2161,6 @@ def render_real_estate_conditions() -> None:
         loan = st.number_input("대출금", min_value=0.0, step=10_000_000.0, key="real_estate_loan")
         rate = st.number_input("대출이자율 (연 %)", min_value=0.0, step=0.1, key="real_estate_rate")
         years = st.number_input("대출기간 (년)", min_value=1, max_value=50, step=1, key="real_estate_years")
-        backtest_years = st.number_input("백테스팅 기간 (년)", min_value=1, max_value=50, step=1, key="real_estate_backtest_years")
     with right:
         repayment = st.selectbox("대출상환방식", ["원리금균등상환", "원금균등상환", "만기일시상환"], key="real_estate_repayment")
         growth = st.number_input("부동산 연 상승률 (%)", step=0.1, key="real_estate_growth")
@@ -2172,6 +2187,14 @@ def render_real_estate_conditions() -> None:
     rent_growth = st.number_input("월세 상승률 (연 %)", min_value=0.0, step=0.1, disabled=rent_cycle == "사용 안 함", key="real_estate_rent_growth")
     stock = st.selectbox("주식 종목", ["VOO", "QQQ"], key="real_estate_stock")
     path_method = st.selectbox("주가 경로 생성 방식", ["Bootstrap", "정규분포"], key="real_estate_path_method", help="Bootstrap은 실제 과거 수익률을 재추출하고, 정규분포는 과거 평균과 변동성으로 경로를 생성합니다.")
+    backtest_years = st.number_input(
+        "백테스팅 기간 (년)",
+        min_value=1,
+        max_value=50,
+        step=1,
+        key="real_estate_backtest_years",
+        help="오늘부터 입력한 연수만큼의 과거 주가를 불러오고, 같은 연수만큼 미래 경로를 시뮬레이션합니다.",
+    )
     back, run = st.columns(2)
     if back.button("뒤로", key="real_estate_back", use_container_width=True):
         st.session_state["current_page"] = "feature"; st.rerun()
@@ -2180,8 +2203,9 @@ def render_real_estate_conditions() -> None:
             show_error_modal("매수가격은 대출금보다 커야 합니다."); return
         try:
             with st.spinner("주가 경로와 상환 계획을 계산하는 중이에요..."):
-                start = datetime.date.today() - datetime.timedelta(days=int(backtest_years * 365.25))
-                hist = download_adjusted_close((stock,), start.isoformat(), datetime.date.today().isoformat())[stock].dropna()
+                end = pd.Timestamp.today().normalize()
+                start = end - pd.DateOffset(years=int(backtest_years))
+                hist = download_adjusted_close((stock,), start.date().isoformat(), end.date().isoformat())[stock].dropna()
                 path, _ = median_price_path(hist, int(backtest_years), path_method)
                 monthly_payment = mortgage_payment(float(loan), float(rate), int(years), repayment)
                 months = int(backtest_years * 12)

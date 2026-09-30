@@ -244,9 +244,9 @@ def render(page: str) -> None:
             st.divider()
             left_action,right_action=st.columns(2)
             with left_action:
-                go_back=st.form_submit_button('뒤로',width='stretch')
+                go_back=st.form_submit_button('뒤로',key='back_f06_conditions',width='stretch')
             with right_action:
-                submitted=st.form_submit_button('테스트 실행',type='primary',width='stretch')
+                submitted=st.form_submit_button('테스트 실행',type='primary',key='run_f06_conditions',width='stretch')
         if go_back:
             go('home'); st.rerun(); return
         if submitted:
