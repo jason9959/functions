@@ -55,3 +55,40 @@ def simulated_price_paths(
     paths[1:] = paths[0] * np.exp(np.cumsum(draws, axis=0))
     dates = pd.bdate_range(pd.Timestamp.today().normalize(), periods=steps + 1)
     return pd.DataFrame(paths, index=dates)
+
+
+def simulated_monthly_price_paths(
+    prices: pd.Series,
+    horizon_years: int,
+    method: str = "Bootstrap",
+    simulations: int = 500,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Return monthly simulation paths without retaining every daily step."""
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+    if len(log_returns) < 2:
+        raise ValueError("몬테카를로 경로를 만들 과거 수익률 데이터가 부족합니다.")
+
+    months = max(int(horizon_years * 12), 1)
+    trading_days_per_month = 21
+    rng = np.random.default_rng(seed)
+    paths = np.empty((months + 1, simulations), dtype=float)
+    paths[0] = float(prices.iloc[-1])
+    historical_values = log_returns.to_numpy(dtype=float)
+
+    for month in range(1, months + 1):
+        if method == "정규분포":
+            monthly_returns = rng.normal(
+                float(log_returns.mean()) * trading_days_per_month,
+                float(log_returns.std(ddof=1)) * np.sqrt(trading_days_per_month),
+                simulations,
+            )
+        else:
+            monthly_returns = rng.choice(
+                historical_values,
+                size=(trading_days_per_month, simulations),
+                replace=True,
+            ).sum(axis=0)
+        paths[month] = paths[month - 1] * np.exp(monthly_returns)
+
+    return pd.DataFrame(paths, index=pd.RangeIndex(months + 1, name="경과 월"))

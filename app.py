@@ -26,7 +26,7 @@ from features.feature09_financial import page as feature09
 from features.feature10_moving_average import page as feature10
 from features.feature11_laoer import page as feature11
 from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
-from features.feature12_real_estate_vs_stock.monte_carlo import historical_price_path, simulated_price_paths
+from features.feature12_real_estate_vs_stock.monte_carlo import historical_price_path, simulated_monthly_price_paths
 from features.feature12_real_estate_vs_stock.simulation import simulate_monthly_comparison
 from features.feature12_real_estate_vs_stock import page as feature12_real_estate
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
@@ -164,7 +164,7 @@ CONDITION_STATE_KEYS = {
     "f10": [
         "f10_ticker", "f10_start", "f10_end", "f10_capital", "f10_splits", "f10_fee", "f10_take_profit", "f10_quarter_stop",
     ],
-        "real_estate": ["real_estate_price", "real_estate_loan", "real_estate_rate", "real_estate_years", "real_estate_backtest_years", "real_estate_growth", "real_estate_repayment", "real_estate_rent", "real_estate_deposit", "real_estate_rent_growth_cycle", "real_estate_rent_growth", "real_estate_stock", "real_estate_path_method"],
+        "real_estate": ["real_estate_price", "real_estate_loan", "real_estate_rate", "real_estate_years", "real_estate_backtest_years", "real_estate_growth", "real_estate_repayment", "real_estate_rent", "real_estate_deposit", "real_estate_rent_growth_cycle", "real_estate_rent_growth", "real_estate_stock", "real_estate_path_method", "real_estate_simulations"],
 }
 
 RESULT_STATE_KEYS = {
@@ -260,6 +260,7 @@ st.markdown(
     }
     .st-key-back_to_feature button,
     .st-key-real_estate_back button,
+    .st-key-real_estate_result_back button,
     .st-key-global_go_feature button {
         background: #FFFFFF !important;
         border-color: #F58220 !important;
@@ -272,6 +273,7 @@ st.markdown(
     }
     .st-key-back_to_feature button p,
     .st-key-real_estate_back button p,
+    .st-key-real_estate_result_back button p,
     .st-key-global_go_feature button p {
         color: #F58220 !important;
         font-weight: 600;
@@ -295,9 +297,32 @@ st.markdown(
     }
     .st-key-back_to_feature button:hover,
     .st-key-real_estate_back button:hover,
+    .st-key-real_estate_result_back button:hover,
     .st-key-global_go_feature button:hover {
         background: #FFF7ED !important;
         border-color: #E66F00 !important;
+    }
+    .st-key-real_estate_result_save button {
+        min-height: 44px !important;
+        padding: 16px 28px !important;
+        background: #FF4B4B !important;
+        border: 1px solid #FF4B4B !important;
+        border-radius: 16px !important;
+        color: #FFFFFF !important;
+    }
+    .st-key-real_estate_result_save button > div {
+        width: 100% !important;
+        justify-content: center !important;
+    }
+    .st-key-real_estate_result_save button p {
+        color: #FFFFFF !important;
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        text-align: center !important;
+    }
+    .st-key-real_estate_result_save button:hover {
+        background: #E83E3E !important;
+        border-color: #E83E3E !important;
     }
     .st-key-back_to_conditions button {
         background: #FFFFFF !important;
@@ -2201,6 +2226,13 @@ def render_real_estate_conditions() -> None:
         key="real_estate_path_method",
         help="기존 주가 이용은 조회 기간의 실제 조정주가 흐름을 그대로 사용합니다. Bootstrap과 정규분포는 과거 수익률로 미래 경로를 생성합니다.",
     )
+    simulations = st.selectbox(
+        "몬테카를로 경로 수",
+        [500, 1000, 1500, 2000, 2500, 3000],
+        key="real_estate_simulations",
+        disabled=path_method == "기존 주가 이용",
+        help="경로 수가 많을수록 분포가 안정적이지만 계산 시간이 늘어납니다.",
+    )
     backtest_years = st.number_input(
         "백테스팅 기간 (년)",
         min_value=1,
@@ -2225,7 +2257,12 @@ def render_real_estate_conditions() -> None:
                 if path_method == "기존 주가 이용":
                     price_path_frame = historical_price_path(hist, int(backtest_years)).to_frame("실제 경로")
                 else:
-                    price_path_frame = simulated_price_paths(hist, int(backtest_years), path_method)
+                    price_path_frame = simulated_monthly_price_paths(
+                        hist,
+                        int(backtest_years),
+                        path_method,
+                        simulations=int(simulations),
+                    )
                 monthly_payment = mortgage_payment(float(loan), float(rate), int(years), repayment)
                 months = int(backtest_years * 12)
                 rent_cycle_months = 0 if rent_cycle == "사용 안 함" else int(rent_cycle[0]) * 12
@@ -2250,6 +2287,7 @@ def render_real_estate_conditions() -> None:
                 st.session_state["real_estate_result"] = {
                     "stock": stock,
                     "path_method": path_method,
+                    "simulation_count": int(price_path_frame.shape[1]),
                     "stock_paths": simulation["stock_values"],
                     "representative_index": representative_index,
                     "house_values": simulation["house_equity"],
@@ -2304,19 +2342,24 @@ def render_real_estate_results() -> None:
     elapsed_years = detail["경과 월"].to_numpy(dtype=float) / 12
     house_line, = axis.plot(detail["경과 월"] / 12, detail["부동산 순자산"], color="#F04452", linewidth=2, label="Real estate net equity")
     if stock_paths.shape[1] > 1:
-        for index in range(stock_paths.shape[1]):
-            axis.plot(elapsed_years, stock_paths[:, index], color="#3182F6", alpha=0.025, linewidth=0.6)
         stock_percentiles = np.percentile(stock_paths, [5, 50, 95], axis=1)
         axis.fill_between(elapsed_years, stock_percentiles[0], stock_percentiles[2], color="#3182F6", alpha=0.14, label="Stock P5-P95")
         stock_line, = axis.plot(elapsed_years, stock_percentiles[1], color="#1769D2", linewidth=2.5, label=f"{result['stock']} P50")
+        central_stock_path = stock_percentiles[1]
     else:
         stock_line, = axis.plot(elapsed_years, representative_stock, color="#3182F6", linewidth=2.5, label=f"{result['stock']} investment")
+        central_stock_path = representative_stock
     from matplotlib.ticker import FuncFormatter
     axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f} KRW"))
     axis.set_xlabel("Elapsed years")
     axis.set_ylabel("Asset value (KRW)")
     axis.grid(alpha=0.2)
     axis.legend(loc="upper left")
+    central_values = np.concatenate((np.asarray(result["house_values"], dtype=float), central_stock_path))
+    central_min = float(np.nanmin(central_values))
+    central_max = float(np.nanmax(central_values))
+    central_span = max(central_max - central_min, max(abs(central_max), 1.0) * 0.1)
+    axis.set_ylim(max(0.0, central_min - central_span * 0.15), central_max + central_span * 0.15)
     end_x = float(detail['경과 월'].iloc[-1] / 12)
     end_house = float(detail['부동산 순자산'].iloc[-1])
     final_stock_values = stock_paths[-1]
@@ -2332,27 +2375,27 @@ def render_real_estate_results() -> None:
     total_contributed = float(np.clip(representative_flows, 0, None).sum())
     total_withdrawn = float(-np.clip(representative_flows, None, 0).sum())
     total_unfunded = float(representative_unfunded.sum())
+    investment_principal = float(result["initial_stock"]) + total_contributed - total_withdrawn
     st.subheader("입력 조건")
-    condition_table = pd.DataFrame({"항목": ["매수가격", "대출금", "초기자금", "주식 초기투자금", "대출기간", "백테스팅 기간", "대출상환방식", "주식 종목", "경로 생성 방식", "보증금", "첫 달 대출상환액"], "값": [f"{result['price']:,.0f}원", f"{result['loan']:,.0f}원", f"{result['initial']:,.0f}원", f"{result['initial_stock']:,.0f}원", f"{result['loan_years']}년", f"{result['backtest_years']}년", result.get('repayment', '-'), result['stock'], result['path_method'], f"{result['deposit']:,.0f}원", f"{result['monthly_payment']:,.0f}원"]})
+    simulation_count_text = "-" if result["path_method"] == "기존 주가 이용" else f"{result.get('simulation_count', stock_paths.shape[1]):,}개"
+    condition_table = pd.DataFrame({"항목": ["매수가격", "대출금", "초기자금", "주식 초기투자금", "대출기간", "백테스팅 기간", "대출상환방식", "주식 종목", "경로 생성 방식", "몬테카를로 경로 수", "보증금", "첫 달 대출상환액"], "값": [f"{result['price']:,.0f}원", f"{result['loan']:,.0f}원", f"{result['initial']:,.0f}원", f"{result['initial_stock']:,.0f}원", f"{result['loan_years']}년", f"{result['backtest_years']}년", result.get('repayment', '-'), result['stock'], result['path_method'], simulation_count_text, f"{result['deposit']:,.0f}원", f"{result['monthly_payment']:,.0f}원"]})
     metric_dataframe(st, condition_table, hide_index=True, width="stretch")
     st.subheader("부동산 매수 결과")
     render_metric_table({"부동산": {"최종 순자산": f"{final_house:,.0f}원", "최종 부동산 가치": f"{result['house_values'][-1] + result['loan_balance'][-1]:,.0f}원", "남은 대출금": f"{result['loan_balance'][-1]:,.0f}원", "첫 달 대출상환액": f"{result['monthly_payment']:,.0f}원"}})
     st.subheader(f"월세 + {result['stock']} 결과")
     stock_metrics = {
-        "최종 주식자산 P50": f"{final_stock:,.0f}원",
+        "누적 월세": f"{np.asarray(result['rent_values'])[1:].sum():,.0f}원",
+        "미충당 월세": f"{total_unfunded:,.0f}원",
+        "초기투자금": f"{result['initial_stock']:,.0f}원",
         "누적 적립": f"{total_contributed:,.0f}원",
         "누적 인출": f"{total_withdrawn:,.0f}원",
-        "미충당 월세": f"{total_unfunded:,.0f}원",
-        "누적 월세": f"{np.asarray(result['rent_values'])[1:].sum():,.0f}원",
+        "투자원금": f"{investment_principal:,.0f}원",
+        "최종 주식자산 P5": f"{final_p5:,.0f}원",
+        "최종 주식자산 P50": f"{final_stock:,.0f}원",
+        "최종 주식자산 P95": f"{final_p95:,.0f}원",
         "최종 차이(P50-부동산)": f"{final_stock-final_house:+,.0f}원",
     }
-    if stock_paths.shape[1] > 1:
-        stock_metrics = {
-            "최종 주식자산 P5": f"{final_p5:,.0f}원",
-            **stock_metrics,
-            "최종 주식자산 P95": f"{final_p95:,.0f}원",
-        }
-    render_metric_table({"월세 + 주식": stock_metrics})
+    render_metric_table({f"월세 + {result['stock']}": stock_metrics})
     with st.expander("자산가격 변화 상세 보기"):
         if stock_paths.shape[1] > 1:
             st.caption("최종 주식자산이 P50에 가장 가까운 한 경로의 월별 내역입니다.")
@@ -2363,11 +2406,11 @@ def render_real_estate_results() -> None:
     if result['path_method'] == "기존 주가 이용":
         st.caption("입력한 백테스팅 기간의 실제 조정주가 경로를 사용했습니다.")
     else:
-        st.caption(f"{result['path_method']} 방식의 500개 경로와 P5~P95 범위, P50 주식자산을 표시했습니다.")
+        st.caption(f"{result['path_method']} 방식의 {result.get('simulation_count', stock_paths.shape[1]):,}개 경로에서 계산한 P5~P95 범위와 P50 주식자산을 표시했습니다.")
     left, right = st.columns(2)
     if left.button("뒤로", key="real_estate_result_back", use_container_width=True): st.session_state["current_page"] = "real_estate_conditions"; st.rerun()
     with right:
-        st.download_button("결과 저장", data=report_png, file_name="real-estate-vs-stock.png", mime="image/png", key="real_estate_result_save", use_container_width=True)
+        st.download_button("결과 저장", data=report_png, file_name="real-estate-vs-stock.png", mime="image/png", key="real_estate_result_save", type="primary", use_container_width=True)
 
 
 page_slot = st.empty()
