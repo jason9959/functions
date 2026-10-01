@@ -27,7 +27,23 @@ def median_price_path(
     seed: int = 42,
 ) -> tuple[pd.Series, pd.Series]:
     """Return the simulated path nearest the median terminal value."""
+    paths = simulated_price_paths(prices, horizon_years, method, simulations, seed)
+    terminal = paths.iloc[-1].to_numpy(dtype=float)
+    selected = int(np.argmin(np.abs(terminal - np.median(terminal))))
+    return paths.iloc[:, selected].copy(), pd.Series(terminal)
+
+
+def simulated_price_paths(
+    prices: pd.Series,
+    horizon_years: int,
+    method: str = "Bootstrap",
+    simulations: int = 500,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Return every simulated adjusted-price path."""
     log_returns = np.log(prices / prices.shift(1)).dropna()
+    if len(log_returns) < 2:
+        raise ValueError("몬테카를로 경로를 만들 과거 수익률 데이터가 부족합니다.")
     steps = max(int(horizon_years * 252), 1)
     rng = np.random.default_rng(seed)
     if method == "정규분포":
@@ -37,7 +53,5 @@ def median_price_path(
     paths = np.empty((steps + 1, simulations), dtype=float)
     paths[0] = float(prices.iloc[-1])
     paths[1:] = paths[0] * np.exp(np.cumsum(draws, axis=0))
-    terminal = paths[-1]
-    selected = int(np.argmin(np.abs(terminal - np.median(terminal))))
     dates = pd.bdate_range(pd.Timestamp.today().normalize(), periods=steps + 1)
-    return pd.Series(paths[:, selected], index=dates), pd.Series(terminal)
+    return pd.DataFrame(paths, index=dates)
