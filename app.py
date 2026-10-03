@@ -2477,6 +2477,10 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "f10_conditions",
     "real_estate_conditions",
     "fear_greed_conditions",
+    "fear_greed_home",
+    "fear_greed_overview",
+    "fear_greed_compare",
+    "fear_greed_results",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:

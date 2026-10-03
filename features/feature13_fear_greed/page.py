@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,6 +16,29 @@ from .data import INDICATORS, fetch_current_fear_greed, fetch_fear_greed, fetch_
 
 def _rating(score: float) -> str:
     return "극단적 공포" if score < 25 else "공포" if score < 45 else "중립" if score <= 55 else "탐욕" if score < 75 else "극단적 탐욕"
+
+
+INDICATOR_DESCRIPTIONS = {
+    "fear_and_greed_historical": "시장 전반의 투자 심리를 0~100점으로 나타낸 종합 지표입니다.",
+    "market_momentum_sp500": "S&P 500의 장기 추세와 현재 위치를 바탕으로 계산한 모멘텀입니다.",
+    "market_momentum_sp125": "S&P 500의 125일 이동평균 대비 추세를 나타냅니다.",
+    "stock_price_strength": "52주 신고가와 신저가 종목의 상대적인 강도를 나타냅니다.",
+    "stock_price_breadth": "상승 종목과 하락 종목의 시장 breadth를 나타냅니다.",
+    "put_call_options": "풋옵션과 콜옵션 거래 비율을 이용한 투자 심리 지표입니다.",
+    "market_volatility_vix": "S&P 500 옵션시장의 기대 변동성을 나타내는 VIX 기반 지표입니다.",
+    "junk_bond_demand": "위험도가 높은 회사채에 대한 수요를 나타냅니다.",
+    "safe_haven_demand": "주식보다 안전자산을 선호하는 정도를 나타냅니다.",
+}
+
+
+def _configure_chart_font() -> None:
+    """서버 환경에서도 한글과 유니코드 기호가 네모로 표시되지 않게 한다."""
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for candidate in ("Malgun Gothic", "Noto Sans CJK KR", "NanumGothic", "AppleGothic"):
+        if candidate in available:
+            plt.rcParams["font.family"] = candidate
+            break
+    plt.rcParams["axes.unicode_minus"] = False
 
 
 def _reset() -> None:
@@ -139,15 +163,20 @@ def _overview() -> None:
             cols = st.columns(3)
             for col, (label, value) in zip(cols, cards[start:start + 3]):
                 col.metric(label, f"{value:.1f}", _rating(value))
+        _configure_chart_font()
         history = current["history"].tail(252)
-        figure, axis = plt.subplots(figsize=(12, 5.2))
-        for key in INDICATORS:
-            if key in history:
-                axis.plot(history.index, history[key], linewidth=1.5, label=INDICATORS[key])
-        for level in (25, 45, 55, 75):
-            axis.axhline(level, color="#DDE3EA", linewidth=.8, linestyle="--")
-        axis.set_ylim(0, 100); axis.set_ylabel("점수"); axis.grid(axis="y", alpha=.2); axis.legend(loc="upper left", fontsize=8)
-        st.pyplot(figure); plt.close(figure)
+        st.subheader("지표별 최근 흐름")
+        for key, label in INDICATORS.items():
+            if key not in history or history[key].dropna().empty:
+                continue
+            st.markdown(f"**{label}** · {INDICATOR_DESCRIPTIONS[key]}")
+            figure, axis = plt.subplots(figsize=(12, 3.4))
+            axis.plot(history.index, history[key], color="#3182F6", linewidth=1.8, label=label)
+            for level in (25, 45, 55, 75):
+                axis.axhline(level, color="#DDE3EA", linewidth=.8, linestyle="--")
+            axis.set_ylim(0, 100); axis.set_ylabel("점수"); axis.set_title(label, loc="left"); axis.grid(axis="y", alpha=.2)
+            axis.legend(loc="upper left", fontsize=9)
+            st.pyplot(figure); plt.close(figure)
     except Exception as exc:
         st.error(f"지표를 불러오지 못했습니다: {exc}")
     st.divider()
@@ -172,6 +201,7 @@ def _compare() -> None:
         second_key = st.selectbox("두 번째 지표 · 오른쪽 Y축", choices, index=min(1, len(choices) - 1), format_func=lambda key: INDICATORS[key], key="fg_compare_second")
     if start < end and first_key != second_key:
         try:
+            _configure_chart_font()
             history = fetch_fear_greed(start.isoformat(), end.isoformat())[[first_key, second_key]].dropna()
             figure, axis_left = plt.subplots(figsize=(12, 5.2)); axis_right = axis_left.twinx()
             axis_left.plot(history.index, history[first_key], color="#3182F6", linewidth=2, label=INDICATORS[first_key])
@@ -199,6 +229,7 @@ def _results() -> None:
     if not result:
         st.session_state["current_page"] = "fear_greed_conditions"; st.rerun(); return
     values = result["values"]; invested = result["invested"]; indicator = result["indicator"]
+    _configure_chart_font()
     st.title("😨 공포·탐욕 지수 리밸런싱 결과")
     st.caption(f"{result['start']} ~ {result['end']} · {INDICATORS[result['indicator_key']]} · {result['direction']} {result['threshold']:.0f} · {result['rebalance_frequency']}")
     figure, axis = plt.subplots(figsize=(12, 5.4)); axis2 = axis.twinx()
