@@ -2473,6 +2473,9 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "monte_bootstrap_conditions",
     "f06_home",
     "f08_conditions",
+    "f09_conditions",
+    "f10_conditions",
+    "real_estate_conditions",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
