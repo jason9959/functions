@@ -2472,6 +2472,7 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "monte_normal_conditions",
     "monte_bootstrap_conditions",
     "f06_home",
+    "f08_conditions",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
