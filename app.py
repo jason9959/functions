@@ -1237,7 +1237,7 @@ def render_feature_page() -> None:
                 "moving_average": "f09_conditions",
                 "laoer_infinite": "f10_conditions",
                 "real_estate_vs_stock": "real_estate_conditions",
-                "fear_greed_rebalance": "fear_greed_conditions",
+                "fear_greed_rebalance": "fear_greed_home",
             }
             st.session_state["current_page"] = page_by_feature[feature["id"]]
             st.rerun()
@@ -2458,7 +2458,7 @@ with page_slot.container():
         feature11.render(page)
     elif page.startswith("real_estate_"):
         feature12_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
-    elif page.startswith("fear_greed_"):
+    elif page.startswith("fear_greed"):
         feature13_fear_greed.render(page)
     else:
         st.session_state["current_page"] = "feature"

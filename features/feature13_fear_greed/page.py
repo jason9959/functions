@@ -106,6 +106,94 @@ def _conditions() -> None:
         st.error(f"백테스트를 계산하지 못했습니다: {exc}")
 
 
+def _home() -> None:
+    st.title("😨 공포·탐욕 지수")
+    st.markdown("<p class='step-caption'>시장 심리 지표를 확인하고 이를 활용한 리밸런싱 전략을 테스트합니다.</p>", unsafe_allow_html=True)
+    menu = [
+        ("fg_home_overview", "📖 **지표 현황 보기**  \n공포·탐욕 사이트에서 제공하는 지표와 흐름을 확인합니다.", "fear_greed_overview"),
+        ("fg_home_rebalance", "📈 **리밸런싱 계산**  \n선택한 지표가 기준값에 도달할 때 포트폴리오를 재조정합니다.", "fear_greed_conditions"),
+        ("fg_home_compare", "📊 **지표 비교 차트**  \n두 지표를 각각의 축으로 비교합니다.", "fear_greed_compare"),
+    ]
+    for key, label, target in menu:
+        if st.button(label, key=key, use_container_width=True):
+            st.session_state["current_page"] = target
+            st.rerun()
+    st.divider()
+    if st.button("뒤로", key="back_fg_home", use_container_width=True):
+        st.session_state["current_page"] = "feature"
+        st.rerun()
+
+
+def _overview() -> None:
+    st.title("📖 공포·탐욕 지수 현황")
+    st.markdown("[CNN Fear & Greed Index 원문 보기](https://edition.cnn.com/markets/fear-and-greed)")
+    try:
+        current = fetch_current_fear_greed()
+        values = current["values"]
+        score = float(values.get("fear_and_greed_historical", np.nan))
+        if np.isfinite(score):
+            st.metric("종합 공포·탐욕 지수", f"{score:.1f}", _rating(score))
+        st.caption(f"기준일: {current['date']:%Y-%m-%d} · 0은 극단적 공포, 100은 극단적 탐욕입니다.")
+        cards = [(INDICATORS[key], float(values[key])) for key in INDICATORS if key in values and np.isfinite(float(values[key]))]
+        for start in range(0, len(cards), 3):
+            cols = st.columns(3)
+            for col, (label, value) in zip(cols, cards[start:start + 3]):
+                col.metric(label, f"{value:.1f}", _rating(value))
+        history = current["history"].tail(252)
+        figure, axis = plt.subplots(figsize=(12, 5.2))
+        for key in INDICATORS:
+            if key in history:
+                axis.plot(history.index, history[key], linewidth=1.5, label=INDICATORS[key])
+        for level in (25, 45, 55, 75):
+            axis.axhline(level, color="#DDE3EA", linewidth=.8, linestyle="--")
+        axis.set_ylim(0, 100); axis.set_ylabel("점수"); axis.grid(axis="y", alpha=.2); axis.legend(loc="upper left", fontsize=8)
+        st.pyplot(figure); plt.close(figure)
+    except Exception as exc:
+        st.error(f"지표를 불러오지 못했습니다: {exc}")
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        if st.button("뒤로", key="back_fg_overview", use_container_width=True): st.session_state["current_page"] = "fear_greed_home"; st.rerun()
+    with right:
+        if st.button("리밸런싱 조건 입력 →", key="run_fg_overview", use_container_width=True): st.session_state["current_page"] = "fear_greed_conditions"; st.rerun()
+
+
+def _compare() -> None:
+    st.title("📊 공포·탐욕 지표 비교")
+    st.caption("첫 번째 지표는 왼쪽 Y축, 두 번째 지표는 오른쪽 Y축에 표시합니다.")
+    today = dt.date.today()
+    start = st.date_input("시작 날짜", value=today - dt.timedelta(days=365), min_value=dt.date(2010, 1, 1), max_value=today, key="fg_compare_start")
+    end = st.date_input("종료 날짜", value=today, min_value=dt.date(2010, 1, 1), max_value=today, key="fg_compare_end")
+    choices = list(INDICATORS)
+    first, second = st.columns(2)
+    with first:
+        first_key = st.selectbox("첫 번째 지표 · 왼쪽 Y축", choices, format_func=lambda key: INDICATORS[key], key="fg_compare_first")
+    with second:
+        second_key = st.selectbox("두 번째 지표 · 오른쪽 Y축", choices, index=min(1, len(choices) - 1), format_func=lambda key: INDICATORS[key], key="fg_compare_second")
+    if start < end and first_key != second_key:
+        try:
+            history = fetch_fear_greed(start.isoformat(), end.isoformat())[[first_key, second_key]].dropna()
+            figure, axis_left = plt.subplots(figsize=(12, 5.2)); axis_right = axis_left.twinx()
+            axis_left.plot(history.index, history[first_key], color="#3182F6", linewidth=2, label=INDICATORS[first_key])
+            axis_right.plot(history.index, history[second_key], color="#F04452", linewidth=2, label=INDICATORS[second_key])
+            axis_left.set_ylabel(INDICATORS[first_key], color="#3182F6"); axis_right.set_ylabel(INDICATORS[second_key], color="#F04452")
+            axis_left.set_ylim(0, 100); axis_right.set_ylim(0, 100); axis_left.grid(alpha=.2)
+            lines, labels = axis_left.get_legend_handles_labels(); lines2, labels2 = axis_right.get_legend_handles_labels(); axis_left.legend(lines + lines2, labels + labels2, loc="upper left")
+            st.pyplot(figure); plt.close(figure)
+        except Exception as exc:
+            st.error(f"비교 그래프를 만들지 못했습니다: {exc}")
+    elif first_key == second_key:
+        st.info("서로 다른 지표를 선택해주세요.")
+    else:
+        st.info("시작 날짜는 종료 날짜보다 앞서야 합니다.")
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        if st.button("뒤로", key="back_fg_compare", use_container_width=True): st.session_state["current_page"] = "fear_greed_home"; st.rerun()
+    with right:
+        if st.button("리밸런싱 조건 입력 →", key="run_fg_compare", use_container_width=True): st.session_state["current_page"] = "fear_greed_conditions"; st.rerun()
+
+
 def _results() -> None:
     result = st.session_state.get("fear_greed_result")
     if not result:
@@ -141,6 +229,10 @@ def _results() -> None:
 
 
 def render(page: str) -> None:
-    if page == "fear_greed_conditions": _conditions()
+    if page in {"fear_greed_home", "fear_greed_rebalance", "fear_greed"}: _home()
+    elif page == "fear_greed_overview": _overview()
+    elif page == "fear_greed_compare": _compare()
+    elif page == "fear_greed_conditions": _conditions()
     elif page == "fear_greed_results": _results()
+    else: _home()
 
