@@ -2476,6 +2476,7 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "f09_conditions",
     "f10_conditions",
     "real_estate_conditions",
+    "fear_greed_conditions",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
