@@ -29,6 +29,7 @@ from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
 from features.feature12_real_estate_vs_stock.monte_carlo import historical_price_path, simulated_monthly_price_paths
 from features.feature12_real_estate_vs_stock.simulation import simulate_monthly_comparison
 from features.feature12_real_estate_vs_stock import page as feature12_real_estate
+from features.feature13_fear_greed import page as feature13_fear_greed
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
 from common.metric_ui import render_metric_table, metric_help
@@ -54,6 +55,7 @@ FEATURES = [
     {"id":"moving_average","icon":"📊","title":"10. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
     {"id":"laoer_infinite","icon":"♾️","title":"11. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
     {"id":"real_estate_vs_stock","icon":"🏠","title":"12. 부동산 vs 주식 투자","description":"주택 매수와 월세·주식 적립 시나리오를 비교합니다."},
+    {"id":"fear_greed_rebalance","icon":"😨","title":"13. 공포·탐욕 지수 리밸런싱","description":"시장 심리 지표가 기준값에 도달할 때 포트폴리오를 재조정합니다."},
 ]
 
 
@@ -87,6 +89,7 @@ for key, default in {
     "monte_bootstrap_result": None,
     "modal_error": None,
     "real_estate_result": None,
+    "fear_greed_result": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1234,6 +1237,7 @@ def render_feature_page() -> None:
                 "moving_average": "f09_conditions",
                 "laoer_infinite": "f10_conditions",
                 "real_estate_vs_stock": "real_estate_conditions",
+                "fear_greed_rebalance": "fear_greed_conditions",
             }
             st.session_state["current_page"] = page_by_feature[feature["id"]]
             st.rerun()
@@ -2454,6 +2458,8 @@ with page_slot.container():
         feature11.render(page)
     elif page.startswith("real_estate_"):
         feature12_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
+    elif page.startswith("fear_greed_"):
+        feature13_fear_greed.render(page)
     else:
         st.session_state["current_page"] = "feature"
         st.rerun()
