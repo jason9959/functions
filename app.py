@@ -2464,7 +2464,16 @@ with page_slot.container():
         st.session_state["current_page"] = "feature"
         st.rerun()
 
-if page != "feature":
+CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
+    "return_comparison_conditions",
+    "periodic_conditions",
+    "portfolio_conditions",
+    "allocation_conditions",
+    "monte_normal_conditions",
+    "monte_bootstrap_conditions",
+}
+
+if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
     if st.button("기능선택 화면으로 이동", key="global_go_feature", use_container_width=True):
         st.session_state["current_page"] = "feature"
         st.rerun()
