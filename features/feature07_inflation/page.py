@@ -190,10 +190,8 @@ def render(page: str) -> None:
             st.button(f'{icon} **{title}**  \n{desc}',key='f06_menu_'+key,width='stretch',on_click=go,args=(key,))
         st.caption(f'저장된 ETF 데이터: {prices.index[0]:%Y.%m.%d} – {prices.index[-1]:%Y.%m.%d} · USD · 배당·분할 조정 가격')
         st.divider()
-        left,_=st.columns(2)
-        with left:
-            if st.button('← 통합 대시보드로 돌아가기',key='f06_back_main',width='stretch'):
-                go_main(); st.rerun()
+        if st.button('기능선택 화면으로 이동', key='global_go_feature', width='stretch'):
+            go_main(); st.rerun()
 
     elif local_page=='rules':
         st.title('📖 전략 이해하기')

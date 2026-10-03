@@ -2471,6 +2471,7 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "allocation_conditions",
     "monte_normal_conditions",
     "monte_bootstrap_conditions",
+    "f06_home",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
