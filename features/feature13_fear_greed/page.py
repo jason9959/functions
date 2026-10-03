@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from common.metric_ui import metric_dataframe, render_metric_table
@@ -163,20 +164,34 @@ def _overview() -> None:
             cols = st.columns(3)
             for col, (label, value) in zip(cols, cards[start:start + 3]):
                 col.metric(label, f"{value:.1f}", _rating(value))
-        _configure_chart_font()
         history = current["history"].tail(252)
         st.subheader("지표별 최근 흐름")
         for key, label in INDICATORS.items():
             if key not in history or history[key].dropna().empty:
                 continue
             st.markdown(f"**{label}** · {INDICATOR_DESCRIPTIONS[key]}")
-            figure, axis = plt.subplots(figsize=(12, 3.4))
-            axis.plot(history.index, history[key], color="#3182F6", linewidth=1.8, label=label)
-            for level in (25, 45, 55, 75):
-                axis.axhline(level, color="#DDE3EA", linewidth=.8, linestyle="--")
-            axis.set_ylim(0, 100); axis.set_ylabel("점수"); axis.set_title(label, loc="left"); axis.grid(axis="y", alpha=.2)
-            axis.legend(loc="upper left", fontsize=9)
-            st.pyplot(figure); plt.close(figure)
+            figure = go.Figure()
+            figure.add_trace(go.Scatter(
+                x=history.index,
+                y=history[key],
+                mode="lines",
+                name=label,
+                line={"color": "#3182F6", "width": 2},
+                connectgaps=True,
+            ))
+            if key == "fear_and_greed_historical":
+                for level, name in [(25, "극단적 공포 경계"), (45, "공포 경계"), (55, "중립 경계"), (75, "탐욕 경계")]:
+                    figure.add_hline(y=level, line_dash="dot", line_color="#DDE3EA", annotation_text=name, annotation_position="top left")
+            figure.update_layout(
+                height=300,
+                margin={"l": 10, "r": 20, "t": 12, "b": 10},
+                showlegend=True,
+                legend={"orientation": "h", "y": 1.02, "x": 0},
+                xaxis={"title": "날짜", "showgrid": False},
+                yaxis={"title": "지표 값", "rangemode": "normal", "showgrid": True, "gridcolor": "#E5E8EB"},
+                hovermode="x unified",
+            )
+            st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False})
     except Exception as exc:
         st.error(f"지표를 불러오지 못했습니다: {exc}")
     st.divider()
