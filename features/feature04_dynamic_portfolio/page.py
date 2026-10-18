@@ -739,6 +739,9 @@ def _render_result_page() -> None:
     with back_col:
         if st.button("뒤로", key="back_dynamic_conditions", use_container_width=True):
             st.session_state["dynamic_show_results"] = False
+            st.session_state["dynamic_result"] = None
+            st.session_state["dynamic_result_config"] = None
+            st.session_state["current_page"] = "feature"
             st.rerun()
     with save_col:
         st.download_button(
@@ -749,16 +752,18 @@ def _render_result_page() -> None:
 
 
 def render(page: str) -> None:
+    _initialize_state()
     if not st.session_state.get("dynamic_show_results"):
         for key, value in st.session_state.get("dynamic_saved_widget_values", {}).items():
             st.session_state.setdefault(key, value)
-    _initialize_state()
     _render_error_dialog()
     if page != "dynamic_portfolio_conditions":
         st.session_state["current_page"] = "dynamic_portfolio_conditions"
         st.rerun()
         return
+    # Keep the condition form mounted and place results below it. This avoids
+    # stale widgets from a separate result route and preserves all inputs.
+    _render_conditions()
     if st.session_state.get("dynamic_show_results"):
+        st.divider()
         _render_result_page()
-    else:
-        _render_conditions()

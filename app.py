@@ -1244,6 +1244,12 @@ def render_feature_page() -> None:
                 "real_estate_vs_stock": "real_estate_conditions",
                 "fear_greed_rebalance": "fear_greed_home",
             }
+            if feature["id"] == "dynamic_portfolio":
+                # Re-entering this feature from the main menu must start on
+                # the condition form instead of showing an old result.
+                st.session_state["dynamic_show_results"] = False
+                st.session_state["dynamic_result"] = None
+                st.session_state["dynamic_result_config"] = None
             st.session_state["current_page"] = page_by_feature[feature["id"]]
             st.rerun()
 
