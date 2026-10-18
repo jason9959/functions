@@ -2428,13 +2428,15 @@ def render_real_estate_results() -> None:
         st.download_button("결과 저장", data=report_png, file_name="real-estate-vs-stock.png", mime="image/png", key="real_estate_result_save", type="primary", use_container_width=True)
 
 
-page_slot = st.empty()
-page_slot.empty()
+# Render into one persistent container. Clearing an empty placeholder on every
+# widget interaction causes the whole app to flash and makes state changes look
+# like a navigation/reset, even when session_state is preserved.
+page_slot = st.container()
 page = st.session_state["current_page"]
 
 # 모든 페이지를 하나의 컨테이너에서만 렌더링한다. 페이지가 바뀌면 이전 화면의
 # 위젯과 버튼이 함께 제거되어, 여러 기능의 입력 화면이 섞이지 않는다.
-with page_slot.container():
+with page_slot:
     if page == "feature":
         render_feature_page()
     elif page.startswith("return_comparison_"):

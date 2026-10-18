@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 from io import StringIO
+import time
 from typing import Any
 
 import pandas as pd
@@ -128,6 +129,18 @@ def _render_error_dialog() -> None:
     dialog()
 
 
+def _add_ticker(state_key: str, ticker: str) -> None:
+    selected = list(st.session_state.get(state_key, []))
+    if ticker and ticker not in selected:
+        st.session_state[state_key] = selected + [ticker]
+
+
+def _remove_ticker(state_key: str, ticker: str) -> None:
+    st.session_state[state_key] = [
+        value for value in st.session_state.get(state_key, []) if value != ticker
+    ]
+
+
 def _asset_selector(role: str, market: str) -> None:
     state_key = f"dynamic_{role}_tickers"
     label = "공격자산" if role == "attack" else "방어자산"
@@ -147,9 +160,7 @@ def _asset_selector(role: str, market: str) -> None:
         selected_ticker = normalize_ticker(query, market)
 
     if st.button(f"{label}에 추가", key=f"dynamic_add_{role}", use_container_width=True, disabled=not selected_ticker):
-        if selected_ticker and selected_ticker not in st.session_state[state_key]:
-            st.session_state[state_key].append(selected_ticker)
-        st.rerun()
+        _add_ticker(state_key, selected_ticker)
 
     selected = list(st.session_state[state_key])
     if not selected:
@@ -158,9 +169,10 @@ def _asset_selector(role: str, market: str) -> None:
     for index, ticker in enumerate(selected):
         text_col, button_col = st.columns([5, 1])
         text_col.markdown(f"**{display_name(ticker, market)}**")
-        if button_col.button("제거", key=f"dynamic_remove_{role}_{index}", use_container_width=True):
-            st.session_state[state_key] = [value for value in selected if value != ticker]
-            st.rerun()
+        button_col.button(
+            "제거", key=f"dynamic_remove_{role}_{index}", use_container_width=True,
+            on_click=_remove_ticker, args=(state_key, ticker),
+        )
 
 
 def _canary_selector(market: str) -> None:
@@ -180,11 +192,10 @@ def _canary_selector(market: str) -> None:
         )
         if default_choice != "선택하세요":
             default_ticker = available_defaults[default_labels.index(default_choice)]
-            if st.button("카나리아에 추가", key="dynamic_add_default_canary", use_container_width=True):
-                if default_ticker not in selected:
-                    selected.append(default_ticker)
-                st.session_state[state_key] = selected
-                st.rerun()
+            st.button(
+                "카나리아에 추가", key="dynamic_add_default_canary", use_container_width=True,
+                on_click=_add_ticker, args=(state_key, default_ticker),
+            )
     else:
         st.caption("기본 후보를 모두 선택했습니다.")
 
@@ -197,19 +208,16 @@ def _canary_selector(market: str) -> None:
         match_labels = [f"{ticker} · {name}" for ticker, name in matches]
         selected_label = st.selectbox("검색 결과", match_labels, key="dynamic_canary_suggestion")
         custom = matches[match_labels.index(selected_label)][0]
-        if st.button("카나리아에 추가", key="dynamic_add_search_canary", use_container_width=True):
-            if custom not in selected:
-                selected.append(custom)
-            st.session_state[state_key] = selected
-            st.rerun()
+        st.button(
+            "카나리아에 추가", key="dynamic_add_search_canary", use_container_width=True,
+            on_click=_add_ticker, args=(state_key, custom),
+        )
     elif query.strip():
         custom = normalize_ticker(query, market)
-        if st.button("입력한 티커 추가", key="dynamic_add_custom_canary", use_container_width=True):
-            if custom not in selected:
-                selected.append(custom)
-            st.session_state[state_key] = selected
-            st.rerun()
-    st.session_state[state_key] = selected
+        st.button(
+            "입력한 티커 추가", key="dynamic_add_custom_canary", use_container_width=True,
+            on_click=_add_ticker, args=(state_key, custom),
+        )
     if selected:
         st.markdown("**선택된 카나리아**")
         pills = " ".join(
@@ -224,10 +232,12 @@ def _canary_selector(market: str) -> None:
             ["선택하세요"] + [display_name(ticker, market) for ticker in selected],
             key="dynamic_canary_remove_choice",
         )
-        if remove_choice != "선택하세요" and st.button("선택 항목 제거", key="dynamic_remove_canary", use_container_width=True):
+        if remove_choice != "선택하세요":
             remove_ticker = selected[[display_name(ticker, market) for ticker in selected].index(remove_choice)]
-            st.session_state[state_key] = [ticker for ticker in selected if ticker != remove_ticker]
-            st.rerun()
+            st.button(
+                "선택 항목 제거", key="dynamic_remove_canary", use_container_width=True,
+                on_click=_remove_ticker, args=(state_key, remove_ticker),
+            )
     else:
         st.info("카나리아 ETF를 선택해주세요.")
 
@@ -289,22 +299,36 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
 def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Series:
     """Download a public FRED series without requiring an API key."""
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
-    response = requests.get(
-        url,
-        params={"id": series_id, "cosd": start_iso, "coed": end_iso},
-        headers={"User-Agent": "stock-simulator/1.0"},
-        timeout=30,
-    )
-    response.raise_for_status()
-    frame = pd.read_csv(StringIO(response.text), na_values=["."])
-    if frame.shape[1] < 2:
-        raise ValueError(f"FRED {series_id} 응답 형식이 올바르지 않습니다.")
-    values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
-    index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
-    series = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
-    if series.empty:
-        raise ValueError(f"FRED {series_id} 데이터를 확보하지 못했습니다.")
-    return series
+    # The dividend-yield series has had multiple public aliases. Try the
+    # current FRED identifier first, then compatible legacy aliases.
+    candidates = {
+        "SP500_DIV_YIELD": ["SP500_DIV_YIELD", "SP500_DIVIDEND_YIELD", "SP500DIVYIELD"],
+    }.get(series_id, [series_id])
+    last_error: Exception | None = None
+    response = None
+    for candidate in candidates:
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    url,
+                    params={"id": candidate, "cosd": start_iso, "coed": end_iso},
+                    headers={"User-Agent": "stock-simulator/1.0"},
+                    timeout=(5, 15),
+                )
+                response.raise_for_status()
+                frame = pd.read_csv(StringIO(response.text), na_values=["."])
+                if frame.shape[1] >= 2:
+                    values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
+                    index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
+                    series = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
+                    if not series.empty:
+                        return series
+                last_error = ValueError(f"FRED {candidate} 데이터가 비어 있습니다.")
+            except (requests.RequestException, ValueError, OSError) as error:
+                last_error = error
+                if attempt == 0:
+                    time.sleep(0.8)
+    raise ValueError(f"FRED {series_id} 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.") from last_error
 
 
 def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dict[str, pd.Series]]:
@@ -354,7 +378,7 @@ def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[s
     if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
         needed.add("UNRATE")
     if "S&P500 배당수익률" in signals:
-        needed.add("SP500DIVYIELD")
+        needed.add("SP500_DIV_YIELD")
     return {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed)}
 
 

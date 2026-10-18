@@ -463,7 +463,7 @@ def _market_signal_details(
             )
             basis = f"{lag}개월 전 금리차 {value:.2f}%p · {active_months}개월 유지"
         elif label == "S&P500 배당수익률":
-            _, value = _market_asof(data["SP500DIVYIELD"], signal_date)
+            _, value = _market_asof(data["SP500_DIV_YIELD"], signal_date)
             threshold = float(risk.get("dividend_threshold", 1.32))
             active = value < threshold
             basis = f"현재 {value:.2f}% < 기준 {threshold:.2f}%"
