@@ -17,19 +17,20 @@ import yfinance as yf
 from features.feature01_comparison import page as feature01
 from features.feature02_periodic_returns import page as feature02
 from features.feature03_portfolio import page as feature03
-from features.feature04_allocation_sweep import page as feature04_allocation
-from features.feature05_monte_carlo_normal import page as feature05
-from features.feature06_monte_carlo_bootstrap import page as feature06
-from features.feature07_inflation import page as feature07
-from features.feature08_dollar import page as feature08
-from features.feature09_financial import page as feature09
-from features.feature10_moving_average import page as feature10
-from features.feature11_laoer import page as feature11
-from features.feature12_real_estate_vs_stock.calculator import mortgage_payment
-from features.feature12_real_estate_vs_stock.monte_carlo import historical_price_path, simulated_monthly_price_paths
-from features.feature12_real_estate_vs_stock.simulation import simulate_monthly_comparison
-from features.feature12_real_estate_vs_stock import page as feature12_real_estate
-from features.feature13_fear_greed import page as feature13_fear_greed
+from features.feature04_dynamic_portfolio import page as feature04_dynamic
+from features.feature05_allocation_sweep import page as feature05_allocation
+from features.feature06_monte_carlo_normal import page as feature06
+from features.feature07_monte_carlo_bootstrap import page as feature07
+from features.feature08_inflation import page as feature08
+from features.feature09_dollar import page as feature09
+from features.feature10_financial import page as feature10
+from features.feature11_moving_average import page as feature11
+from features.feature12_laoer import page as feature12
+from features.feature13_real_estate_vs_stock.calculator import mortgage_payment
+from features.feature13_real_estate_vs_stock.monte_carlo import historical_price_path, simulated_monthly_price_paths
+from features.feature13_real_estate_vs_stock.simulation import simulate_monthly_comparison
+from features.feature13_real_estate_vs_stock import page as feature13_real_estate
+from features.feature14_fear_greed import page as feature14_fear_greed
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
 from common.metric_ui import render_metric_table, metric_help
@@ -45,17 +46,18 @@ st.set_page_config(
 FEATURES = [
     {"id":"return_comparison","icon":"📈","title":"1. 상대 수익률 비교","description":"여러 종목을 같은 기준값 100으로 비교합니다."},
     {"id":"periodic_returns","icon":"🗓️","title":"2. 주기별 수익률 분석","description":"과거 수익률의 분포와 주기별 흐름을 확인합니다."},
-    {"id":"portfolio_backtest","icon":"💼","title":"3. 포트폴리오 백테스트","description":"자산 비중과 리밸런싱 전략을 과거 데이터로 확인합니다."},
-    {"id":"allocation_sweep","icon":"⚖️","title":"4. 비율별 리밸런싱 분석","description":"종목 비율을 바꿔가며 포트폴리오 성과를 비교합니다."},
-    {"id":"monte_carlo_normal","icon":"🎲","title":"5. 정규분포 몬테카를로","description":"과거 수익률의 평균과 변동성으로 미래 주가를 만듭니다."},
-    {"id":"monte_carlo_bootstrap","icon":"🧩","title":"6. Bootstrap 몬테카를로","description":"실제 과거 수익률을 다시 뽑아 미래 주가를 만듭니다."},
-    {"id":"inflation_compass","icon":"🧭","title":"7. 인플레이션 나침반","description":"성장과 기대인플레이션 국면에 따른 자산 전략을 검증합니다."},
-    {"id":"dollar_compass","icon":"💵","title":"8. 달러 환율 나침반","description":"환율·달러지수 조건과 원화/달러 스위칭 전략을 분석합니다."},
-    {"id":"financial_dashboard","icon":"🏢","title":"9. 기업 재무 대시보드","description":"DART·SEC 공식 공시로 기업 재무상태·손익·현금흐름을 확인합니다."},
-    {"id":"moving_average","icon":"📊","title":"10. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
-    {"id":"laoer_infinite","icon":"♾️","title":"11. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
-    {"id":"real_estate_vs_stock","icon":"🏠","title":"12. 부동산 vs 주식 투자","description":"주택 매수와 월세·주식 적립 시나리오를 비교합니다."},
-    {"id":"fear_greed_rebalance","icon":"😨","title":"13. 공포·탐욕 지수 리밸런싱","description":"시장 심리 지표가 기준값에 도달할 때 포트폴리오를 재조정합니다."},
+    {"id":"portfolio_backtest","icon":"💼","title":"3. 정적 포트폴리오 백테스트","description":"고정 자산 비중과 리밸런싱 전략을 과거 데이터로 확인합니다."},
+    {"id":"dynamic_portfolio","icon":"🔄","title":"4. 동적 포트폴리오 백테스트","description":"시장 조건에 따라 자산 비중을 변경하는 전략을 검증합니다."},
+    {"id":"allocation_sweep","icon":"⚖️","title":"5. 비율별 리밸런싱 분석","description":"종목 비율을 바꿔가며 포트폴리오 성과를 비교합니다."},
+    {"id":"monte_carlo_normal","icon":"🎲","title":"6. 정규분포 몬테카를로","description":"과거 수익률의 평균과 변동성으로 미래 주가를 만듭니다."},
+    {"id":"monte_carlo_bootstrap","icon":"🧩","title":"7. Bootstrap 몬테카를로","description":"실제 과거 수익률을 다시 뽑아 미래 주가를 만듭니다."},
+    {"id":"inflation_compass","icon":"🧭","title":"8. 인플레이션 나침반","description":"성장과 기대인플레이션 국면에 따른 자산 전략을 검증합니다."},
+    {"id":"dollar_compass","icon":"💵","title":"9. 달러 환율 나침반","description":"환율·달러지수 조건과 원화/달러 스위칭 전략을 분석합니다."},
+    {"id":"financial_dashboard","icon":"🏢","title":"10. 기업 재무 대시보드","description":"DART·SEC 공식 공시로 기업 재무상태·손익·현금흐름을 확인합니다."},
+    {"id":"moving_average","icon":"📊","title":"11. 이동평균 투자전략 백테스트","description":"BUY/SELL 확인 횟수와 LIMIT을 포함한 이동평균 전략을 검증합니다."},
+    {"id":"laoer_infinite","icon":"♾️","title":"12. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
+    {"id":"real_estate_vs_stock","icon":"🏠","title":"13. 부동산 vs 주식 투자","description":"주택 매수와 월세·주식 적립 시나리오를 비교합니다."},
+    {"id":"fear_greed_rebalance","icon":"😨","title":"14. 공포·탐욕 지수 리밸런싱","description":"시장 심리 지표가 기준값에 도달할 때 포트폴리오를 재조정합니다."},
 ]
 
 
@@ -1228,6 +1230,7 @@ def render_feature_page() -> None:
                 "return_comparison": "return_comparison_conditions",
                 "periodic_returns": "periodic_conditions",
                 "portfolio_backtest": "portfolio_conditions",
+                "dynamic_portfolio": "dynamic_portfolio_conditions",
                 "allocation_sweep": "allocation_conditions",
                 "monte_carlo_normal": "monte_normal_conditions",
                 "monte_carlo_bootstrap": "monte_bootstrap_conditions",
@@ -1792,7 +1795,7 @@ def render_allocation_results() -> None:
 
 
 def render_portfolio_conditions() -> None:
-    st.title("💼 포트폴리오 백테스트")
+    st.title("💼 정적 포트폴리오 백테스트")
     st.markdown(
         "<p class='step-caption'>자산 비중과 투자 방식을 입력하면, 과거 기간의 포트폴리오 자산 변화를 계산합니다.</p>",
         unsafe_allow_html=True,
@@ -1931,7 +1934,7 @@ def render_portfolio_results() -> None:
     invested = result["invested"]
     contributions = invested.diff().fillna(0.0)
     perf = performance_summary(values, contributions, float(invested.iloc[0]))
-    st.title("💼 포트폴리오 백테스트 결과")
+    st.title("💼 정적 포트폴리오 백테스트 결과")
     st.caption(
         f"공통 분석 기간: {result['common_start']:%Y-%m-%d} ~ {result['common_end']:%Y-%m-%d} · "
         f"리밸런싱: {result['rebalance_frequency']}"
@@ -2432,34 +2435,36 @@ with page_slot.container():
         feature02.render(page, render_periodic_return_conditions, render_periodic_return_results)
     elif page.startswith("portfolio_"):
         feature03.render(page, render_portfolio_conditions, render_portfolio_results)
+    elif page.startswith("dynamic_portfolio_"):
+        feature04_dynamic.render(page)
     elif page.startswith("allocation_"):
-        feature04_allocation.render(page, render_allocation_conditions, render_allocation_results)
+        feature05_allocation.render(page, render_allocation_conditions, render_allocation_results)
     elif page.startswith("monte_normal_"):
-        feature05.render(
+        feature06.render(
             page,
             lambda: render_monte_carlo_conditions("normal"),
             lambda: render_monte_carlo_results("normal"),
         )
     elif page.startswith("monte_bootstrap_"):
-        feature06.render(
+        feature07.render(
             page,
             lambda: render_monte_carlo_conditions("bootstrap"),
             lambda: render_monte_carlo_results("bootstrap"),
         )
     elif page.startswith("f06_"):
-        feature07.render(page)
-    elif page.startswith("f07_"):
         feature08.render(page)
-    elif page.startswith("f08_"):
+    elif page.startswith("f07_"):
         feature09.render(page)
-    elif page.startswith("f09_"):
+    elif page.startswith("f08_"):
         feature10.render(page)
-    elif page.startswith("f10_"):
+    elif page.startswith("f09_"):
         feature11.render(page)
+    elif page.startswith("f10_"):
+        feature12.render(page)
     elif page.startswith("real_estate_"):
-        feature12_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
+        feature13_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
     elif page.startswith("fear_greed"):
-        feature13_fear_greed.render(page)
+        feature14_fear_greed.render(page)
     else:
         st.session_state["current_page"] = "feature"
         st.rerun()
@@ -2468,6 +2473,7 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "return_comparison_conditions",
     "periodic_conditions",
     "portfolio_conditions",
+    "dynamic_portfolio_conditions",
     "allocation_conditions",
     "monte_normal_conditions",
     "monte_bootstrap_conditions",

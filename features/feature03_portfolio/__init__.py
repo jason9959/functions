@@ -1,1 +1,1 @@
-"""Feature 03: portfolio backtest."""
+"""Feature 03: static portfolio backtest."""

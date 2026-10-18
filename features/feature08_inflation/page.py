@@ -160,7 +160,7 @@ def render(page: str) -> None:
     fred_path=ROOT/'data/T5YIE.csv'
     if not price_path.exists() or not fred_path.exists():
         st.title('🧭 인플레이션 나침반')
-        st.error('7번 기능의 로컬 데이터 파일이 없습니다. features/feature07_inflation/data 폴더를 확인해 주세요.')
+        st.error('8번 기능의 로컬 데이터 파일이 없습니다. features/feature08_inflation/data 폴더를 확인해 주세요.')
         if st.button('← 통합 대시보드로 돌아가기',key='f06_missing_back',width='stretch'):
             go_main(); st.rerun()
         return
