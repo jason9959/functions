@@ -47,7 +47,7 @@ FEATURES = [
     {"id":"return_comparison","icon":"📈","title":"1. 상대 수익률 비교","description":"여러 종목을 같은 기준값 100으로 비교합니다."},
     {"id":"periodic_returns","icon":"🗓️","title":"2. 주기별 수익률 분석","description":"과거 수익률의 분포와 주기별 흐름을 확인합니다."},
     {"id":"portfolio_backtest","icon":"💼","title":"3. 정적 포트폴리오 백테스트","description":"고정 자산 비중과 리밸런싱 전략을 과거 데이터로 확인합니다."},
-    {"id":"dynamic_portfolio","icon":"🔄","title":"4. 동적 포트폴리오 백테스트","description":"시장 조건에 따라 자산 비중을 변경하는 전략을 검증합니다."},
+    {"id":"dynamic_portfolio","icon":"🔄","title":"4. 동적 포트폴리오 백테스트","description":"모멘텀과 방어 스위치로 자산 비중을 바꾸는 전략을 검증합니다."},
     {"id":"allocation_sweep","icon":"⚖️","title":"5. 비율별 리밸런싱 분석","description":"종목 비율을 바꿔가며 포트폴리오 성과를 비교합니다."},
     {"id":"monte_carlo_normal","icon":"🎲","title":"6. 정규분포 몬테카를로","description":"과거 수익률의 평균과 변동성으로 미래 주가를 만듭니다."},
     {"id":"monte_carlo_bootstrap","icon":"🧩","title":"7. Bootstrap 몬테카를로","description":"실제 과거 수익률을 다시 뽑아 미래 주가를 만듭니다."},
