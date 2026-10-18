@@ -231,7 +231,26 @@ def _run(config: dict[str, Any]) -> dict[str, Any]:
     equal_weight_nav = attack_navs.mean(axis=1).rename("동일 비중")
     all_assets = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
     asset_nav = pd.concat([_normalized(prices[ticker].rename(ticker), index) for ticker in all_assets], axis=1)
-    result.update({"benchmark_nav": benchmark_nav, "equal_weight_nav": equal_weight_nav, "asset_nav": asset_nav})
+    # Keep the calculation snapshot useful to a human reviewer: the engine
+    # stores tickers and raw scores, while the screen adds the catalog name.
+    snapshots = {}
+    for snapshot_key, snapshot in result["candidate_snapshots"].items():
+        snapshot = snapshot.copy()
+        if "티커" in snapshot.columns:
+            snapshot.insert(
+                2 if "역할" in snapshot.columns else 1,
+                "ETF 명",
+                snapshot["티커"].map(
+                    lambda ticker: "현금" if ticker == "현금" else display_name(str(ticker), config["market"])
+                ),
+            )
+        snapshots[snapshot_key] = snapshot
+    result.update({
+        "benchmark_nav": benchmark_nav,
+        "equal_weight_nav": equal_weight_nav,
+        "asset_nav": asset_nav,
+        "candidate_snapshots": snapshots,
+    })
     return result
 
 

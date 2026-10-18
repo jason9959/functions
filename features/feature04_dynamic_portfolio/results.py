@@ -331,6 +331,11 @@ def render(result: dict[str, Any], config: dict[str, Any]) -> None:
             for column in ["상대 계산값", "절대 계산값", "BIL 기준값", "최종 목표 비중"]:
                 if column in detail:
                     detail[column] = pd.to_numeric(detail[column], errors="coerce")
+            for column in ["초기 배분 비중", "최종 목표 비중"]:
+                if column in detail:
+                    detail[column] = detail[column].map(
+                        lambda value: "-" if pd.isna(value) else f"{float(value):.1%}"
+                    )
             st.dataframe(detail, hide_index=True, use_container_width=True)
             st.subheader("최종 배분 검증")
             total = sum(result["final_weights"].values())

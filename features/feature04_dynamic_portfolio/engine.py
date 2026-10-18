@@ -208,8 +208,9 @@ def _attack_allocation(
     weights: dict[str, float] = {}
     defense_amount = 0.0
     audit: list[dict[str, Any]] = []
+    initial_amount = amount / len(selected) if selected else 0.0
     if switched:
-        base = amount / len(selected) if selected else 0.0
+        base = initial_amount
         for ticker in selected:
             if ticker in passed:
                 weights[ticker] = base
@@ -237,12 +238,17 @@ def _attack_allocation(
                 "상대 선택": relative_selected,
                 "절대 통과": absolute_passed,
                 "선택 여부": ticker in passed,
+                "초기 배분 비중": initial_amount / amount if amount > 0 else 0.0,
                 "최종 목표 비중": weights.get(ticker, 0.0),
                 "결과 사유": reason,
             }
         )
     cash_amount = 0.0 if switched else max(0.0, amount - sum(weights.values()))
-    return weights, defense_amount + 0.0, audit + ([{"역할": "공격", "티커": CASH, "최종 목표 비중": cash_amount, "결과 사유": "공격자산 기준 미달"}] if cash_amount else [])
+    return weights, defense_amount + 0.0, audit + ([{
+        "역할": "공격", "티커": CASH, "선택 여부": True,
+        "초기 배분 비중": cash_amount / amount if amount > 0 else 0.0,
+        "최종 목표 비중": cash_amount, "결과 사유": "공격자산 기준 미달",
+    }] if cash_amount else [])
 
 
 def _defense_allocation(
@@ -283,8 +289,9 @@ def _defense_allocation(
         cash_switch = mode == "상대 & 절대 모멘텀 + 현금 스위치"
 
     weights: dict[str, float] = {}
+    initial_amount = amount / len(chosen) if chosen else 0.0
     if cash_switch:
-        base = amount / len(chosen) if chosen else 0.0
+        base = initial_amount
         for ticker in chosen:
             target = ticker if ticker in passed else CASH
             weights[target] = weights.get(target, 0.0) + base
@@ -301,6 +308,7 @@ def _defense_allocation(
             {
                 **{key: value for key, value in row.items() if not key.endswith("상세")},
                 "선택 여부": selected,
+                "초기 배분 비중": initial_amount / amount if amount > 0 else 0.0,
                 "최종 목표 비중": weights.get(ticker, 0.0),
                 "결과 사유": "방어자산 선택" if selected else "방어자산 기준 미달",
             }
