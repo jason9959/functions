@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 from typing import Any
 
 import pandas as pd
@@ -150,15 +151,26 @@ def _canary_selector(market: str) -> None:
     state_key = "dynamic_canary_tickers"
     st.markdown("#### 카나리아 ETF")
     st.caption("위험 신호 계산에만 사용하며 실제 투자자산으로 자동 편입하지 않습니다.")
-    options = list(dict.fromkeys(CANARY_DEFAULTS + st.session_state.get(state_key, [])))
-    labels = [f"{ticker} · {display_name(ticker, market)}" for ticker in options]
-    selected_labels = st.multiselect(
-        "기본 후보 선택",
-        labels,
-        default=[labels[options.index(ticker)] for ticker in st.session_state.get(state_key, []) if ticker in options],
-        key="dynamic_canary_selection",
-    )
-    selected = [options[labels.index(label)] for label in selected_labels]
+    selected = list(dict.fromkeys(st.session_state.get(state_key, [])))
+    available_defaults = [ticker for ticker in CANARY_DEFAULTS if ticker not in selected]
+    if available_defaults:
+        # display_name already includes the ticker when a catalog name exists.
+        default_labels = [display_name(ticker, market) for ticker in available_defaults]
+        default_choice = st.selectbox(
+            "기본 후보 선택",
+            ["선택하세요"] + default_labels,
+            key="dynamic_canary_default_choice",
+        )
+        if default_choice != "선택하세요":
+            default_ticker = available_defaults[default_labels.index(default_choice)]
+            if st.button("카나리아에 추가", key="dynamic_add_default_canary", use_container_width=True):
+                if default_ticker not in selected:
+                    selected.append(default_ticker)
+                st.session_state[state_key] = selected
+                st.rerun()
+    else:
+        st.caption("기본 후보를 모두 선택했습니다.")
+
     query = st.text_input(
         "사용자 정의 카나리아 추가", key="dynamic_canary_query",
         placeholder="예: VTI, KODEX 200",
@@ -168,7 +180,7 @@ def _canary_selector(market: str) -> None:
         match_labels = [f"{ticker} · {name}" for ticker, name in matches]
         selected_label = st.selectbox("검색 결과", match_labels, key="dynamic_canary_suggestion")
         custom = matches[match_labels.index(selected_label)][0]
-        if st.button("카나리아에 추가", key="dynamic_add_canary", use_container_width=True):
+        if st.button("카나리아에 추가", key="dynamic_add_search_canary", use_container_width=True):
             if custom not in selected:
                 selected.append(custom)
             st.session_state[state_key] = selected
@@ -182,7 +194,23 @@ def _canary_selector(market: str) -> None:
             st.rerun()
     st.session_state[state_key] = selected
     if selected:
-        st.caption("선택된 카나리아: " + ", ".join(selected))
+        st.markdown("**선택된 카나리아**")
+        pills = " ".join(
+            f"<span style='display:inline-block;background:#ff4b4b;color:white;"
+            f"border-radius:0.45rem;padding:0.35rem 0.65rem;margin:0.15rem 0.25rem 0.15rem 0;"
+            f"font-weight:600;'>{html.escape(display_name(ticker, market))}</span>"
+            for ticker in selected
+        )
+        st.markdown(pills, unsafe_allow_html=True)
+        remove_choice = st.selectbox(
+            "선택된 카나리아 제거",
+            ["선택하세요"] + [display_name(ticker, market) for ticker in selected],
+            key="dynamic_canary_remove_choice",
+        )
+        if remove_choice != "선택하세요" and st.button("선택 항목 제거", key="dynamic_remove_canary", use_container_width=True):
+            remove_ticker = selected[[display_name(ticker, market) for ticker in selected].index(remove_choice)]
+            st.session_state[state_key] = [ticker for ticker in selected if ticker != remove_ticker]
+            st.rerun()
     else:
         st.info("카나리아 ETF를 선택해주세요.")
 
