@@ -320,6 +320,7 @@ def render(result: dict[str, Any], config: dict[str, Any]) -> None:
                 "공격자산 비중", "방어자산 비중", "현금 비중", "턴오버",
                 "카나리아 전환율", "카나리아 전환 비중",
                 "카나리아 적용 전 공격자산 비중", "카나리아 적용 후 공격자산 비중",
+                "시장 전환 비중",
             ]:
                 if column not in display_history:
                     continue
@@ -352,6 +353,15 @@ def render(result: dict[str, Any], config: dict[str, Any]) -> None:
                         lambda value: "-" if pd.isna(value) else f"{float(value):.2%}"
                     )
                 st.dataframe(canary_show, hide_index=True, use_container_width=True)
+            market_audit = result.get("market_audits", {}).get(selected_date)
+            if market_audit is not None and not market_audit.empty:
+                st.subheader("시장 데이터 위험 회피 상세")
+                market_show = market_audit.copy()
+                if "원시값" in market_show:
+                    market_show["원시값"] = market_show["원시값"].map(
+                        lambda value: "-" if pd.isna(value) else f"{float(value):.2f}"
+                    )
+                st.dataframe(market_show, hide_index=True, use_container_width=True)
             st.subheader("최종 배분 검증")
             total = sum(result["final_weights"].values())
             st.success(f"공격자산·방어자산·현금 비중 합계: {total:.1%}")

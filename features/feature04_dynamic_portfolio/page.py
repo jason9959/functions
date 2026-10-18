@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+from io import StringIO
 from typing import Any
 
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -31,6 +33,14 @@ SCORE_TYPES = [
 ]
 CANARY_DEFAULTS = ["VWO", "BND", "EEM", "AGG", "SPY", "BIL", "TIP"]
 CANARY_APPLY_MODES = ["중립형", "방어형", "공격형"]
+MARKET_SIGNAL_LABELS = [
+    "장단기 금리차 역전 (10년-2년)",
+    "S&P500 배당수익률",
+    "실업률",
+    "실업률 & SPY (GTT-UE)",
+    "삼의 법칙 (Sahm's Rule)",
+    "삼의 법칙과 SPY 모멘텀",
+]
 
 
 def _default_form() -> dict[str, Any]:
@@ -63,6 +73,13 @@ def _default_form() -> dict[str, Any]:
         "dynamic_risk_direction": "마이너스(-)",
         "dynamic_risk_momentum_type": "절대 모멘텀",
         "dynamic_risk_same_momentum": True,
+        "dynamic_market_risk_enabled": False,
+        "dynamic_market_risk_combine": "OR",
+        "dynamic_market_risk_signals": [],
+        "dynamic_market_spread_lag": 0,
+        "dynamic_market_spread_active": 3,
+        "dynamic_market_dividend_threshold": 1.32,
+        "dynamic_market_unemployment_months": 12,
         "dynamic_use_transaction_cost": False,
         "dynamic_transaction_cost": 0.1,
     }
@@ -268,18 +285,43 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
     return prices.apply(pd.to_numeric, errors="coerce").sort_index()
 
 
-def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str]:
+@st.cache_data(ttl=3600, show_spinner=False)
+def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Series:
+    """Download a public FRED series without requiring an API key."""
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    response = requests.get(
+        url,
+        params={"id": series_id, "cosd": start_iso, "coed": end_iso},
+        headers={"User-Agent": "stock-simulator/1.0"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    frame = pd.read_csv(StringIO(response.text), na_values=["."])
+    if frame.shape[1] < 2:
+        raise ValueError(f"FRED {series_id} 응답 형식이 올바르지 않습니다.")
+    values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
+    index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
+    series = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
+    if series.empty:
+        raise ValueError(f"FRED {series_id} 데이터를 확보하지 못했습니다.")
+    return series
+
+
+def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dict[str, pd.Series]]:
     market = config["market"]
     requested = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
     risk = config.get("risk_avoidance") or {}
     canaries = list(risk.get("tickers", [])) if risk.get("enabled") else []
+    market_risk = config.get("market_risk") or {}
     if market == "해외 ETF":
         benchmark_source = {"S&P500": "SPY", "NASDAQ100": "QQQ", "KOSPI": "069500.KS"}[config["benchmark"]]
         extra = [benchmark_source, "BIL"] + (["KRW=X"] if config["benchmark"] == "KOSPI" else [])
     else:
         benchmark_source = {"S&P500": "360750.KS", "NASDAQ100": "133690.KS", "KOSPI": "069500.KS"}[config["benchmark"]]
         extra = [benchmark_source, "BIL", "KRW=X"]
-    symbols = tuple(dict.fromkeys(requested + extra + canaries))
+    market_signals = set(market_risk.get("signals", [])) if market_risk.get("enabled") else set()
+    market_symbols = ["SPY"] if any("SPY" in label for label in market_signals) else []
+    symbols = tuple(dict.fromkeys(requested + extra + canaries + market_symbols))
     lookback = pd.Timestamp(config["start_date"]) - pd.DateOffset(months=13, days=10)
     raw = _download_prices(symbols, lookback.date().isoformat(), config["end_date"].isoformat())
     missing = [ticker for ticker in symbols if ticker not in raw.columns or raw[ticker].dropna().empty]
@@ -295,11 +337,25 @@ def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str]:
     prices = raw.ffill()
     if market == "국내 ETF":
         prices["BIL_KRW"] = prices["BIL"] * prices["KRW=X"]
-        return prices, benchmark_source, "BIL_KRW"
+        market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
+        return prices, benchmark_source, "BIL_KRW", market_data
     if config["benchmark"] == "KOSPI":
         prices["KOSPI_USD"] = prices[benchmark_source] / prices["KRW=X"]
-        return prices, "KOSPI_USD", "BIL"
-    return prices, benchmark_source, "BIL"
+        market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
+        return prices, "KOSPI_USD", "BIL", market_data
+    market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
+    return prices, benchmark_source, "BIL", market_data
+
+
+def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[str, pd.Series]:
+    if not signals:
+        return {}
+    needed = {"DGS10", "DGS2"} if any("금리차" in label for label in signals) else set()
+    if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
+        needed.add("UNRATE")
+    if "S&P500 배당수익률" in signals:
+        needed.add("SP500DIVYIELD")
+    return {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed)}
 
 
 def _normalized(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
@@ -310,9 +366,11 @@ def _normalized(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
 
 
 def _run(config: dict[str, Any]) -> dict[str, Any]:
-    prices, benchmark_ticker, bil_ticker = _prepare_prices(config)
+    prices, benchmark_ticker, bil_ticker, market_data = _prepare_prices(config)
     config["bil_ticker"] = bil_ticker
-    result = run_backtest(prices, config)
+    engine_config = dict(config)
+    engine_config["_market_data"] = market_data
+    result = run_backtest(prices, engine_config)
     index = result["nav"].index
     benchmark_nav = _normalized(prices[benchmark_ticker].rename("벤치마크"), index)
     attack_navs = pd.concat([_normalized(prices[ticker].rename(ticker), index) for ticker in config["attack_tickers"]], axis=1)
@@ -345,12 +403,17 @@ def _run(config: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
         canary_audits[snapshot_key] = audit
+    market_audits = {
+        snapshot_key: audit.copy()
+        for snapshot_key, audit in result.get("market_audits", {}).items()
+    }
     result.update({
         "benchmark_nav": benchmark_nav,
         "equal_weight_nav": equal_weight_nav,
         "asset_nav": asset_nav,
         "candidate_snapshots": snapshots,
         "canary_audits": canary_audits,
+        "market_audits": market_audits,
     })
     return result
 
@@ -544,6 +607,52 @@ def _render_conditions() -> None:
             risk_same_momentum = True
             risk_custom_momentum = MomentumConfig()
 
+        st.divider()
+        market_risk_enabled = st.checkbox(
+            "위험 회피 옵션 B — 시장 데이터 사용",
+            key="dynamic_market_risk_enabled",
+            help="금리차·실업률 등 공개 시장 지표를 위험 신호로 사용합니다.",
+        )
+        market_risk_signals = list(st.session_state.get("dynamic_market_risk_signals", []))
+        if market_risk_enabled:
+            market_risk_combine = st.radio(
+                "시장 위험 신호 적용 방식", ["OR", "AND"], horizontal=True,
+                key="dynamic_market_risk_combine",
+                help="OR은 하나라도 활성화되면, AND는 선택한 조건이 모두 활성화될 때 발동합니다.",
+            )
+            selected_signals = []
+            signal_cols = st.columns(2)
+            for index, label in enumerate(MARKET_SIGNAL_LABELS):
+                with signal_cols[index % 2]:
+                    if st.checkbox(label, key=f"dynamic_market_signal_{index}"):
+                        selected_signals.append(label)
+            market_risk_signals = selected_signals
+            spread_lag = st.number_input(
+                "금리차 반영 지연 (개월)", min_value=0, max_value=12, step=1,
+                key="dynamic_market_spread_lag", disabled=not any("금리차" in label for label in market_risk_signals),
+            )
+            spread_active = st.number_input(
+                "금리차 신호 유지 기간 (개월)", min_value=1, max_value=24, step=1,
+                key="dynamic_market_spread_active", disabled=not any("금리차" in label for label in market_risk_signals),
+            )
+            dividend_threshold = st.number_input(
+                "S&P500 배당수익률 기준 (%)", min_value=0.0, max_value=20.0, step=0.01,
+                key="dynamic_market_dividend_threshold", disabled="S&P500 배당수익률" not in market_risk_signals,
+            )
+            unemployment_months = st.number_input(
+                "실업률 비교 평균 기간 (개월)", min_value=3, max_value=36, step=1,
+                key="dynamic_market_unemployment_months",
+                disabled=not any("실업률" in label or "삼의 법칙" in label for label in market_risk_signals),
+            )
+            if not market_risk_signals:
+                st.info("시장 위험 신호를 하나 이상 선택해주세요.")
+        else:
+            market_risk_combine = st.session_state.get("dynamic_market_risk_combine", "OR")
+            spread_lag = st.session_state.get("dynamic_market_spread_lag", 0)
+            spread_active = st.session_state.get("dynamic_market_spread_active", 3)
+            dividend_threshold = st.session_state.get("dynamic_market_dividend_threshold", 1.32)
+            unemployment_months = st.session_state.get("dynamic_market_unemployment_months", 12)
+
     back_col, result_col = st.columns(2)
     with back_col:
         go_back = st.button("뒤로", key="back_dynamic_portfolio", use_container_width=True)
@@ -590,6 +699,15 @@ def _render_conditions() -> None:
             "momentum_type": risk_momentum_type,
             "same_momentum": bool(risk_same_momentum),
             "custom_momentum": risk_custom_momentum,
+        },
+        "market_risk": {
+            "enabled": bool(market_risk_enabled),
+            "combine": market_risk_combine,
+            "signals": market_risk_signals,
+            "spread_lag_months": int(spread_lag),
+            "spread_active_months": int(spread_active),
+            "dividend_threshold": float(dividend_threshold),
+            "unemployment_months": int(unemployment_months),
         },
         "use_transaction_cost": bool(use_cost), "transaction_cost_rate": float(cost_rate / 100.0),
     }

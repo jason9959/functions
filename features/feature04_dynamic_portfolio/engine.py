@@ -409,6 +409,124 @@ def _apply_canary_overlay(
     return adjusted, moved, summary
 
 
+def _market_asof(series: pd.Series, when: pd.Timestamp) -> tuple[pd.Timestamp, float]:
+    valid = series.loc[:when].dropna()
+    if valid.empty:
+        raise ValueError("시장 데이터의 판단 기준일 이전 값이 없습니다.")
+    return pd.Timestamp(valid.index[-1]), float(valid.iloc[-1])
+
+
+def _market_signal_details(
+    prices: pd.DataFrame, signal_date: pd.Timestamp, config: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Evaluate the public market-data signals selected in the B option."""
+    risk = config.get("market_risk") or {}
+    data = config.get("_market_data") or {}
+    labels = list(dict.fromkeys(risk.get("signals", [])))
+    if not labels:
+        raise ValueError("시장 데이터 위험 회피 옵션을 켠 경우 신호를 한 개 이상 선택해주세요.")
+    rows: list[dict[str, Any]] = []
+    lag = int(risk.get("spread_lag_months", 0))
+    active_months = int(risk.get("spread_active_months", 3))
+    unemployment_months = int(risk.get("unemployment_months", 12))
+
+    def monthly(series: pd.Series) -> pd.Series:
+        # "M" works on the local pandas version and remains compatible with
+        # newer versions where month-end aliases may be renamed.
+        return series.dropna().resample("M").last().dropna()
+
+    def unemployment_state() -> tuple[bool, float, float]:
+        series = monthly(data["UNRATE"])
+        _, current = _market_asof(series, signal_date)
+        prior = series.loc[:signal_date].iloc[:-1]
+        if len(prior) < unemployment_months:
+            raise ValueError(f"실업률 계산에 필요한 {unemployment_months}개월 데이터가 부족합니다.")
+        average = float(prior.iloc[-unemployment_months:].mean())
+        previous = float(prior.iloc[-1])
+        return current > average and current > previous, current, average
+
+    for label in labels:
+        active = False
+        value: float | None = None
+        basis = ""
+        if "금리차" in label:
+            dgs10, dgs2 = data["DGS10"], data["DGS2"]
+            spread = dgs10.reindex(dgs10.index.union(dgs2.index)).ffill() - dgs2.reindex(dgs10.index.union(dgs2.index)).ffill()
+            target = signal_date - pd.DateOffset(months=lag)
+            spread_monthly = monthly(spread)
+            _, value = _market_asof(spread_monthly, target)
+            dates = [target - pd.DateOffset(months=offset) for offset in range(max(1, active_months))]
+            active = any(
+                _market_asof(spread_monthly, date)[1] < 0
+                for date in dates
+                if not spread_monthly.loc[:date].dropna().empty
+            )
+            basis = f"{lag}개월 전 금리차 {value:.2f}%p · {active_months}개월 유지"
+        elif label == "S&P500 배당수익률":
+            _, value = _market_asof(data["SP500DIVYIELD"], signal_date)
+            threshold = float(risk.get("dividend_threshold", 1.32))
+            active = value < threshold
+            basis = f"현재 {value:.2f}% < 기준 {threshold:.2f}%"
+        elif label == "실업률":
+            active, current, average = unemployment_state()
+            value = current
+            basis = f"현재 {current:.2f}% · 이전 평균 {average:.2f}%"
+        elif label == "실업률 & SPY (GTT-UE)":
+            unemployment_active, current, average = unemployment_state()
+            spy = prices["SPY"].dropna()
+            _, spy_current = _market_asof(spy, signal_date)
+            _, spy_ma = _market_asof(spy.loc[:signal_date].rolling(210, min_periods=100).mean().dropna(), signal_date)
+            active = unemployment_active and spy_current < spy_ma
+            value = current
+            basis = f"실업률 {current:.2f}% / 평균 {average:.2f}% · SPY {spy_current:.2f} < MA {spy_ma:.2f}"
+        elif label in {"삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}:
+            series = monthly(data["UNRATE"])
+            _, current = _market_asof(series, signal_date)
+            rolling = series.rolling(3).mean().dropna()
+            current_avg = _market_asof(rolling, signal_date)[1]
+            prior = rolling.loc[:signal_date].iloc[:-1]
+            if len(prior) < 12:
+                raise ValueError("Sahm's Rule 계산에 필요한 실업률 데이터가 부족합니다.")
+            prior_min = float(prior.iloc[-12:].min())
+            previous = float(series.loc[:signal_date].iloc[:-1].iloc[-1])
+            sahm = current_avg >= prior_min + 0.5 and current > previous
+            active = sahm
+            value = current_avg
+            basis = f"3개월 평균 {current_avg:.2f}% / 이전 12개월 최저 {prior_min:.2f}%"
+            if label == "삼의 법칙과 SPY 모멘텀":
+                spy = prices["SPY"].dropna()
+                _, spy_current = _market_asof(spy, signal_date)
+                _, spy_ma = _market_asof(spy.loc[:signal_date].rolling(210, min_periods=100).mean().dropna(), signal_date)
+                active = sahm and spy_current < spy_ma
+                basis += f" · SPY {spy_current:.2f} < MA {spy_ma:.2f}"
+        rows.append({"시장 신호": label, "원시값": value, "위험 판정": bool(active), "판정 근거": basis})
+    return rows
+
+
+def _apply_market_overlay(
+    prices: pd.DataFrame, signal_date: pd.Timestamp, attack_weights: dict[str, float], config: dict[str, Any]
+) -> tuple[dict[str, float], float, dict[str, Any]]:
+    risk = config.get("market_risk") or {}
+    if not risk.get("enabled"):
+        return attack_weights, 0.0, {"enabled": False, "triggered": False, "audit": pd.DataFrame()}
+    audit = _market_signal_details(prices, signal_date, config)
+    active = [bool(row["위험 판정"]) for row in audit]
+    triggered = any(active) if risk.get("combine", "OR") == "OR" else bool(active) and all(active)
+    conversion = 1.0 if triggered else 0.0
+    before_attack = sum(weight for ticker, weight in attack_weights.items() if ticker != CASH)
+    moved = before_attack * conversion
+    adjusted = {
+        ticker: weight * (1.0 - conversion) if ticker != CASH else weight
+        for ticker, weight in attack_weights.items()
+    }
+    return adjusted, moved, {
+        "enabled": True, "triggered": triggered, "combine": risk.get("combine", "OR"),
+        "audit": pd.DataFrame(audit), "active_count": sum(active), "signal_count": len(active),
+        "conversion": conversion, "before_attack": before_attack,
+        "after_attack": sum(weight for ticker, weight in adjusted.items() if ticker != CASH), "moved": moved,
+    }
+
+
 def _previous_market_date(index: pd.DatetimeIndex, date: pd.Timestamp) -> pd.Timestamp:
     candidates = index[index < date]
     if not len(candidates):
@@ -466,6 +584,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
     history: list[dict[str, Any]] = []
     candidate_snapshots: dict[str, pd.DataFrame] = {}
     canary_audits: dict[str, pd.DataFrame] = {}
+    market_audits: dict[str, pd.DataFrame] = {}
     target_weights: dict[str, float] = {CASH: 1.0}
     previous_attack: set[str] = set()
     previous_defense: set[str] = set()
@@ -524,9 +643,21 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                 config["attack_select_count"], previous_attack, config["attack_tickers"], attack_bil,
             )
             pre_canary_attack_weights = attack_weights.copy()
-            attack_weights, canary_moved, canary_summary = _apply_canary_overlay(
+            attack_weights, market_moved, market_summary = _apply_market_overlay(
                 prices, signal_date, attack_weights, config,
             )
+            if market_summary.get("triggered"):
+                canary_moved = 0.0
+                canary_summary = {
+                    "enabled": False,
+                    "skipped": True,
+                    "skip_reason": "B 우선 발동으로 A 미평가",
+                    "audit": pd.DataFrame(),
+                }
+            else:
+                attack_weights, canary_moved, canary_summary = _apply_canary_overlay(
+                    prices, signal_date, attack_weights, config,
+                )
             for row in attack_audit:
                 ticker = row.get("티커")
                 before_weight = pre_canary_attack_weights.get(ticker, 0.0)
@@ -537,7 +668,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                 if row.get("카나리아 전환 비중", 0.0) > 0:
                     row["결과 사유"] = f"{row.get('결과 사유', '')} · 카나리아 전환"
             base_defense = 1.0 - attack_base
-            fixed_and_switched = base_defense + switched_amount + canary_moved
+            fixed_and_switched = base_defense + switched_amount + market_moved + canary_moved
             defense_weights: dict[str, float] = {}
             defense_audit: list[dict[str, Any]] = []
             if fixed_and_switched > 0:
@@ -591,6 +722,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
             snapshot_key = date.strftime("%Y-%m-%d")
             candidate_snapshots[snapshot_key] = pd.DataFrame(rows)
             canary_audits[snapshot_key] = canary_summary["audit"]
+            market_audits[snapshot_key] = market_summary["audit"]
             history.append(
                 {
                     "예정일": schedule_map[date].date(),
@@ -609,6 +741,15 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                     "카나리아 전환 비중": canary_summary.get("moved", 0.0),
                     "카나리아 적용 전 공격자산 비중": canary_summary.get("before_attack", 0.0),
                     "카나리아 적용 후 공격자산 비중": canary_summary.get("after_attack", 0.0),
+                    "시장 위험 회피": "미사용" if not market_summary["enabled"] else ("발동" if market_summary.get("triggered") else "안전"),
+                    "시장 위험 신호 수": market_summary.get("active_count", 0),
+                    "시장 신호 수": market_summary.get("signal_count", 0),
+                    "시장 전환 비중": market_summary.get("moved", 0.0),
+                    "시장 신호 결합": market_summary.get("combine", "-"),
+                    "시장 위험 회피 사유": (
+                        "B 우선 발동으로 A 미평가" if market_summary.get("triggered")
+                        else ("B 미발동 후 A 평가" if market_summary.get("enabled") else "-")
+                    ),
                     "턴오버": 0.0 if date == start_actual else turnover,
                     "거래비용": fee,
                     "평가금액": after_value,
@@ -652,6 +793,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
         "history": pd.DataFrame(history),
         "candidate_snapshots": candidate_snapshots,
         "canary_audits": canary_audits,
+        "market_audits": market_audits,
         "final_weights": target_weights,
         "annual_turnover": turnover_sum / years,
         "common_start": start_actual,
