@@ -167,11 +167,19 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
     if raw is None or raw.empty:
         raise ValueError("Yahoo Finance에서 가격 데이터를 가져오지 못했습니다.")
     if isinstance(raw.columns, pd.MultiIndex):
-        level = "Adj Close" if "Adj Close" in raw.columns.get_level_values(0) else "Close"
-        prices = raw[level].copy()
+        if "Adj Close" not in raw.columns.get_level_values(0):
+            raise ValueError(
+                "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
+                "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
+            )
+        prices = raw["Adj Close"].copy()
     else:
-        column = "Adj Close" if "Adj Close" in raw.columns else "Close"
-        prices = raw[[column]].copy()
+        if "Adj Close" not in raw.columns:
+            raise ValueError(
+                "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
+                "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
+            )
+        prices = raw[["Adj Close"]].copy()
         prices.columns = [symbols[0]]
     if isinstance(prices, pd.Series):
         prices = prices.to_frame(name=symbols[0])

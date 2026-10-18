@@ -317,17 +317,32 @@ def _previous_market_date(index: pd.DatetimeIndex, date: pd.Timestamp) -> pd.Tim
 
 def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
     """Run the strategy and preserve each rebalance decision snapshot."""
-    prices = prices.sort_index().astype(float).ffill()
+    # Keep the unfilled frame for the common-period calculation.  If we filled
+    # first, a stale last quote could make a ticker appear to have data beyond
+    # its actual end date and the backtest would silently use a shorter/invalid
+    # common period.
+    raw_prices = prices.sort_index().astype(float)
     requested_start = pd.Timestamp(config["start_date"])
     requested_end = pd.Timestamp(config["end_date"])
     required_tickers = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
-    valid_starts = [prices[ticker].dropna().index.min() for ticker in required_tickers]
-    valid_ends = [prices[ticker].dropna().index.max() for ticker in required_tickers]
+    missing_columns = [ticker for ticker in required_tickers if ticker not in raw_prices.columns]
+    if missing_columns:
+        raise ValueError("가격 데이터가 없는 종목: " + ", ".join(missing_columns))
+    nonempty = {ticker: raw_prices[ticker].dropna() for ticker in required_tickers}
+    empty_tickers = [ticker for ticker, series in nonempty.items() if series.empty]
+    if empty_tickers:
+        raise ValueError("가격 데이터가 없는 종목: " + ", ".join(empty_tickers))
+    valid_starts = [series.index.min() for series in nonempty.values()]
+    valid_ends = [series.index.max() for series in nonempty.values()]
     start = max([requested_start, *valid_starts])
     end = min([requested_end, *valid_ends])
-    evaluation_index = prices.index[(prices.index >= start) & (prices.index <= end)]
+    evaluation_index = raw_prices.index[(raw_prices.index >= start) & (raw_prices.index <= end)]
     if len(evaluation_index) < 2:
         raise ValueError("평가 기간의 공통 거래일이 부족합니다.")
+    # Forward fill only after the common period has been established.  This is
+    # for isolated missing observations; it cannot extend a ticker's usable
+    # start or end date anymore.
+    prices = raw_prices.ffill()
     start_actual, end_actual = pd.Timestamp(evaluation_index[0]), pd.Timestamp(evaluation_index[-1])
     schedules = scheduled_trade_dates(evaluation_index, start_actual, end_actual, config["rebalance_frequency"])
     schedule_map = {actual: planned for planned, actual in schedules}
