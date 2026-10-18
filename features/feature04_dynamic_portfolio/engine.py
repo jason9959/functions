@@ -134,6 +134,25 @@ def _absolute_pass(
     return value >= threshold
 
 
+_ATTACK_ABSOLUTE_MODES = {
+    "절대 모멘텀",
+    "절대 모멘텀 + 방어 스위치",
+    "상대 & 절대 모멘텀",
+    "상대 & 절대 모멘텀 + 방어 스위치",
+}
+
+
+def _weight_momentum_config(config: dict[str, Any], mode: str) -> tuple[MomentumConfig, str]:
+    """Choose the momentum calculation used by the portfolio-weight option."""
+    same_key = "negative_same_momentum" if mode == "마이너스 절대 모멘텀 수" else "positive_same_momentum"
+    if not config.get(same_key, True):
+        custom_key = "negative_momentum" if mode == "마이너스 절대 모멘텀 수" else "positive_momentum"
+        return config[custom_key], "독립 기준"
+    if config.get("attack_mode") in _ATTACK_ABSOLUTE_MODES:
+        return config["attack_absolute"], "투자자산 절대 기준"
+    return config["attack_relative"], "투자자산 상대 기준"
+
+
 def _evaluate_candidates(
     prices: pd.DataFrame,
     candidates: list[str],
@@ -348,12 +367,47 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                 config["attack_relative"], config["attack_absolute"],
                 config["attack_use_bil"], config["bil_ticker"], "공격",
             )
-            attack_base = 1.0 - config["fixed_defense_weight"]
+            weight_mode = config.get("weight_mode", "고정 범위")
+            weight_summary = "고정 범위"
+            if weight_mode == "마이너스 절대 모멘텀 수":
+                weight_config, weight_basis = _weight_momentum_config(config, weight_mode)
+                weight_values = {}
+                for ticker in config["attack_tickers"]:
+                    if config.get("negative_same_momentum", True):
+                        field = "절대 계산값" if config.get("attack_mode") in _ATTACK_ABSOLUTE_MODES else "상대 계산값"
+                        value = float(attack_rows[ticker][field])
+                    else:
+                        value = float(momentum_detail(prices[ticker], signal_date, weight_config)["계산값"])
+                    weight_values[ticker] = value
+                    attack_rows[ticker]["비중 기준값"] = value
+                    attack_rows[ticker]["비중 통과"] = value >= 0.0
+                negative_count = sum(value < 0.0 for value in weight_values.values())
+                attack_base = 0.0 if negative_count >= int(config["negative_threshold"]) else 1.0
+                weight_summary = f"{weight_basis} · 마이너스 {negative_count}개 / 기준 {int(config['negative_threshold'])}개"
+            elif weight_mode == "플러스 절대 모멘텀 자산 개수 비중 한도":
+                weight_config, weight_basis = _weight_momentum_config(config, weight_mode)
+                weight_values = {}
+                for ticker in config["attack_tickers"]:
+                    if config.get("positive_same_momentum", True):
+                        field = "절대 계산값" if config.get("attack_mode") in _ATTACK_ABSOLUTE_MODES else "상대 계산값"
+                        value = float(attack_rows[ticker][field])
+                    else:
+                        value = float(momentum_detail(prices[ticker], signal_date, weight_config)["계산값"])
+                    weight_values[ticker] = value
+                    attack_rows[ticker]["비중 기준값"] = value
+                    attack_rows[ticker]["비중 통과"] = value >= 0.0
+                valid_count = len(weight_values)
+                positive_count = sum(value >= 0.0 for value in weight_values.values())
+                attack_base = positive_count / valid_count if valid_count else 0.0
+                weight_summary = f"{weight_basis} · 플러스 {positive_count}/{valid_count}개"
+            else:
+                attack_base = 1.0 - float(config.get("fixed_defense_weight", 0.0))
             attack_weights, switched_amount, attack_audit = _attack_allocation(
                 config["attack_mode"], attack_base, attack_rows,
                 config["attack_select_count"], previous_attack, config["attack_tickers"], attack_bil,
             )
-            fixed_and_switched = config["fixed_defense_weight"] + switched_amount
+            base_defense = 1.0 - attack_base
+            fixed_and_switched = base_defense + switched_amount
             defense_weights: dict[str, float] = {}
             defense_audit: list[dict[str, Any]] = []
             if fixed_and_switched > 0:
@@ -415,6 +469,8 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                     "공격자산 비중": sum(attack_weights.values()),
                     "방어자산 비중": sum(value for ticker, value in defense_weights.items() if ticker != CASH),
                     "현금 비중": new_weights.get(CASH, 0.0),
+                    "포트폴리오 비중 방식": weight_mode,
+                    "비중 판정": weight_summary,
                     "턴오버": 0.0 if date == start_actual else turnover,
                     "거래비용": fee,
                     "평가금액": after_value,

@@ -49,8 +49,12 @@ def _default_form() -> dict[str, Any]:
         "dynamic_defense_select_count": 1,
         "dynamic_include_cash": True,
         "dynamic_same_momentum": True,
+        "dynamic_weight_mode": "고정 범위",
         "dynamic_fixed_defense": False,
         "dynamic_fixed_defense_weight": 20.0,
+        "dynamic_negative_threshold": 1,
+        "dynamic_negative_same_momentum": True,
+        "dynamic_positive_same_momentum": True,
         "dynamic_use_transaction_cost": False,
         "dynamic_transaction_cost": 0.1,
     }
@@ -313,13 +317,60 @@ def _render_conditions() -> None:
             defense_use_bil = st.checkbox("방어 절대모멘텀 기준을 BIL로 변경", key="dynamic_defense_use_bil", disabled=not defense_enabled or not _uses_absolute(defense_mode))
 
     with tabs[4]:
-        use_fixed_defense = st.checkbox("방어자산 고정비중 사용", key="dynamic_fixed_defense")
-        fixed_defense = st.number_input("방어자산 고정비중 (%)", min_value=0.0, max_value=100.0, step=1.0, key="dynamic_fixed_defense_weight", disabled=not use_fixed_defense)
-        effective_defense = fixed_defense if use_fixed_defense else 0.0
-        split = pd.DataFrame({"구분": ["공격자산 기본 몫", "방어자산 고정 몫"], "비중": [100.0 - effective_defense, effective_defense]})
-        st.dataframe(split.style.format({"비중": "{:.1f}%"}), hide_index=True, use_container_width=True)
-        if use_fixed_defense and not defense_enabled:
-            st.info("방어자산 선택을 사용하지 않아 방어자산 고정 몫은 현금으로 보유합니다.")
+        st.caption("공격자산과 방어자산의 기본 비중을 결정하는 방식입니다. 한 번에 하나만 적용됩니다.")
+        weight_mode = st.radio(
+            "포트폴리오 비중 결정 방식",
+            ["고정 범위", "마이너스 절대 모멘텀 수", "플러스 절대 모멘텀 자산 개수 비중 한도"],
+            key="dynamic_weight_mode",
+            help="고정 범위는 입력한 방어 비중을 유지합니다. 나머지 두 방식은 전체 공격자산 후보의 절대 모멘텀 결과로 기본 비중을 계산합니다.",
+        )
+        use_fixed_defense = False
+        fixed_defense = 0.0
+        negative_threshold = 1
+        negative_same_momentum = True
+        positive_same_momentum = True
+        negative_momentum = MomentumConfig()
+        positive_momentum = MomentumConfig()
+        if weight_mode == "고정 범위":
+            use_fixed_defense = st.checkbox("방어자산 고정비중 사용", key="dynamic_fixed_defense")
+            fixed_defense = st.number_input(
+                "방어자산 고정비중 (%)", min_value=0.0, max_value=100.0, step=1.0,
+                key="dynamic_fixed_defense_weight", disabled=not use_fixed_defense,
+            ) if use_fixed_defense else 0.0
+            effective_defense = fixed_defense if use_fixed_defense else 0.0
+            split = pd.DataFrame({"구분": ["공격자산 기본 몫", "방어자산 고정 몫"], "비중": [100.0 - effective_defense, effective_defense]})
+            st.dataframe(split.style.format({"비중": "{:.1f}%"}), hide_index=True, use_container_width=True)
+            if use_fixed_defense and not defense_enabled:
+                st.info("방어자산 선택을 사용하지 않아 방어자산 고정 몫은 현금으로 보유합니다.")
+        elif weight_mode == "마이너스 절대 모멘텀 수":
+            threshold_options = list(range(1, max(1, len(attack_tickers)) + 1))
+            st.session_state["dynamic_negative_threshold"] = min(
+                int(st.session_state.get("dynamic_negative_threshold", 1)), len(threshold_options)
+            )
+            negative_threshold = st.selectbox(
+                "기준 자산 수 N", threshold_options,
+                format_func=lambda value: f"{value}개 이상이면 전체 방어자산 전환",
+                key="dynamic_negative_threshold", disabled=not attack_tickers,
+            )
+            negative_same_momentum = st.checkbox(
+                "투자자산 선택기준과 동일 모멘텀 적용",
+                key="dynamic_negative_same_momentum",
+                help="체크하면 투자자산 선택 탭의 절대 모멘텀 기준을 재사용합니다. 절대 기준이 없는 방식은 상대 기준을 사용합니다.",
+            )
+            if negative_same_momentum:
+                st.caption("투자자산 탭의 모멘텀 기준을 사용해 전체 공격자산 후보의 0% 미만 개수를 계산합니다.")
+            else:
+                negative_momentum = _momentum_input("dynamic_weight_negative", "비중 산출용 절대모멘텀")
+        else:
+            positive_same_momentum = st.checkbox(
+                "투자자산 선택기준과 동일 모멘텀 적용",
+                key="dynamic_positive_same_momentum",
+                help="체크하면 투자자산 선택 탭의 절대 모멘텀 기준을 재사용합니다. 절대 기준이 없는 방식은 상대 기준을 사용합니다.",
+            )
+            if positive_same_momentum:
+                st.caption("투자자산 탭의 모멘텀 기준을 사용해 전체 공격자산 후보 중 0% 이상 자산의 비중을 계산합니다.")
+            else:
+                positive_momentum = _momentum_input("dynamic_weight_positive", "비중 산출용 절대모멘텀")
 
     back_col, result_col = st.columns(2)
     with back_col:
@@ -352,7 +403,13 @@ def _render_conditions() -> None:
         "defense_enabled": bool(defense_enabled), "defense_mode": defense_mode,
         "defense_select_count": int(defense_select_count), "defense_relative": defense_relative,
         "defense_absolute": defense_absolute, "defense_use_bil": bool(defense_use_bil),
-        "include_cash": bool(include_cash), "fixed_defense_weight": float(effective_defense / 100.0),
+        "include_cash": bool(include_cash), "weight_mode": weight_mode,
+        "fixed_defense_weight": float((fixed_defense if use_fixed_defense else 0.0) / 100.0),
+        "negative_threshold": int(negative_threshold),
+        "negative_same_momentum": bool(negative_same_momentum),
+        "negative_momentum": negative_momentum,
+        "positive_same_momentum": bool(positive_same_momentum),
+        "positive_momentum": positive_momentum,
         "use_transaction_cost": bool(use_cost), "transaction_cost_rate": float(cost_rate / 100.0),
     }
     try:
