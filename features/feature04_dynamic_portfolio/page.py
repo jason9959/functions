@@ -28,6 +28,8 @@ SCORE_TYPES = [
     "1-3-6개월 단순", "3-6-12개월 단순", "1-3-6-12개월 단순",
     "1-3-6-9-12개월 단순", "1-3-6-12개월 가중",
 ]
+CANARY_DEFAULTS = ["VWO", "BND", "EEM", "AGG", "SPY", "BIL", "TIP"]
+CANARY_APPLY_MODES = ["중립형", "방어형", "공격형"]
 
 
 def _default_form() -> dict[str, Any]:
@@ -55,6 +57,11 @@ def _default_form() -> dict[str, Any]:
         "dynamic_negative_threshold": 1,
         "dynamic_negative_same_momentum": True,
         "dynamic_positive_same_momentum": True,
+        "dynamic_risk_enabled": False,
+        "dynamic_risk_apply_mode": "중립형",
+        "dynamic_risk_direction": "마이너스(-)",
+        "dynamic_risk_momentum_type": "절대 모멘텀",
+        "dynamic_risk_same_momentum": True,
         "dynamic_use_transaction_cost": False,
         "dynamic_transaction_cost": 0.1,
     }
@@ -65,6 +72,7 @@ def _initialize_state() -> None:
         st.session_state.setdefault(key, value)
     st.session_state.setdefault("dynamic_attack_tickers", ["SPY", "QQQ"])
     st.session_state.setdefault("dynamic_defense_tickers", ["IEF", "IAU"])
+    st.session_state.setdefault("dynamic_canary_tickers", [])
     st.session_state.setdefault("dynamic_show_results", False)
     st.session_state.setdefault("dynamic_result", None)
     st.session_state.setdefault("dynamic_result_config", None)
@@ -79,6 +87,7 @@ def _reset_form() -> None:
         st.session_state[key] = value
     st.session_state["dynamic_attack_tickers"] = ["SPY", "QQQ"]
     st.session_state["dynamic_defense_tickers"] = ["IEF", "IAU"]
+    st.session_state["dynamic_canary_tickers"] = []
     st.session_state["dynamic_result"] = None
     st.session_state["dynamic_result_config"] = None
     st.session_state.pop("_dynamic_market_seen", None)
@@ -134,6 +143,48 @@ def _asset_selector(role: str, market: str) -> None:
         if button_col.button("제거", key=f"dynamic_remove_{role}_{index}", use_container_width=True):
             st.session_state[state_key] = [value for value in selected if value != ticker]
             st.rerun()
+
+
+def _canary_selector(market: str) -> None:
+    """Select canary ETFs used only for the risk-avoidance signal."""
+    state_key = "dynamic_canary_tickers"
+    st.markdown("#### 카나리아 ETF")
+    st.caption("위험 신호 계산에만 사용하며 실제 투자자산으로 자동 편입하지 않습니다.")
+    options = list(dict.fromkeys(CANARY_DEFAULTS + st.session_state.get(state_key, [])))
+    labels = [f"{ticker} · {display_name(ticker, market)}" for ticker in options]
+    selected_labels = st.multiselect(
+        "기본 후보 선택",
+        labels,
+        default=[labels[options.index(ticker)] for ticker in st.session_state.get(state_key, []) if ticker in options],
+        key="dynamic_canary_selection",
+    )
+    selected = [options[labels.index(label)] for label in selected_labels]
+    query = st.text_input(
+        "사용자 정의 카나리아 추가", key="dynamic_canary_query",
+        placeholder="예: VTI, KODEX 200",
+    )
+    matches = suggestions(query, market)
+    if matches:
+        match_labels = [f"{ticker} · {name}" for ticker, name in matches]
+        selected_label = st.selectbox("검색 결과", match_labels, key="dynamic_canary_suggestion")
+        custom = matches[match_labels.index(selected_label)][0]
+        if st.button("카나리아에 추가", key="dynamic_add_canary", use_container_width=True):
+            if custom not in selected:
+                selected.append(custom)
+            st.session_state[state_key] = selected
+            st.rerun()
+    elif query.strip():
+        custom = normalize_ticker(query, market)
+        if st.button("입력한 티커 추가", key="dynamic_add_custom_canary", use_container_width=True):
+            if custom not in selected:
+                selected.append(custom)
+            st.session_state[state_key] = selected
+            st.rerun()
+    st.session_state[state_key] = selected
+    if selected:
+        st.caption("선택된 카나리아: " + ", ".join(selected))
+    else:
+        st.info("카나리아 ETF를 선택해주세요.")
 
 
 def _momentum_input(prefix: str, title: str) -> MomentumConfig:
@@ -192,17 +243,26 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
 def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str]:
     market = config["market"]
     requested = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
+    risk = config.get("risk_avoidance") or {}
+    canaries = list(risk.get("tickers", [])) if risk.get("enabled") else []
     if market == "해외 ETF":
         benchmark_source = {"S&P500": "SPY", "NASDAQ100": "QQQ", "KOSPI": "069500.KS"}[config["benchmark"]]
         extra = [benchmark_source, "BIL"] + (["KRW=X"] if config["benchmark"] == "KOSPI" else [])
     else:
         benchmark_source = {"S&P500": "360750.KS", "NASDAQ100": "133690.KS", "KOSPI": "069500.KS"}[config["benchmark"]]
         extra = [benchmark_source, "BIL", "KRW=X"]
-    symbols = tuple(dict.fromkeys(requested + extra))
+    symbols = tuple(dict.fromkeys(requested + extra + canaries))
     lookback = pd.Timestamp(config["start_date"]) - pd.DateOffset(months=13, days=10)
     raw = _download_prices(symbols, lookback.date().isoformat(), config["end_date"].isoformat())
     missing = [ticker for ticker in symbols if ticker not in raw.columns or raw[ticker].dropna().empty]
     if missing:
+        missing_canaries = [ticker for ticker in missing if ticker in canaries]
+        if missing_canaries:
+            raise ValueError(
+                "선택한 카나리아 ETF의 가격 데이터를 확보하지 못했습니다: "
+                + ", ".join(missing_canaries)
+                + f" (필요 기간: {lookback:%Y-%m-%d} ~ {config['end_date']:%Y-%m-%d})"
+            )
         raise ValueError("가격 데이터가 없는 종목: " + ", ".join(missing))
     prices = raw.ffill()
     if market == "국내 ETF":
@@ -245,11 +305,24 @@ def _run(config: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
         snapshots[snapshot_key] = snapshot
+    canary_audits = {}
+    for snapshot_key, audit in result.get("canary_audits", {}).items():
+        audit = audit.copy()
+        if "티커" in audit.columns:
+            audit.insert(
+                1,
+                "ETF 명",
+                audit["티커"].map(
+                    lambda ticker: "현금" if ticker == "현금" else display_name(str(ticker), config["market"])
+                ),
+            )
+        canary_audits[snapshot_key] = audit
     result.update({
         "benchmark_nav": benchmark_nav,
         "equal_weight_nav": equal_weight_nav,
         "asset_nav": asset_nav,
         "candidate_snapshots": snapshots,
+        "canary_audits": canary_audits,
     })
     return result
 
@@ -261,7 +334,10 @@ def _render_conditions() -> None:
         _reset_form()
         st.rerun()
 
-    tabs = st.tabs(["기본설정", "종목선택", "투자자산 선택", "방어자산 선택", "포트폴리오 비중"])
+    tabs = st.tabs([
+        "기본설정", "종목선택", "투자자산 선택", "방어자산 선택",
+        "포트폴리오 비중", "위험 회피 옵션",
+    ])
     with tabs[0]:
         date_col, end_col, initial_col = st.columns(3)
         start_date = date_col.date_input("시작 날짜", min_value=EARLIEST_DATE, max_value=dt.date.today(), key="dynamic_start")
@@ -399,6 +475,47 @@ def _render_conditions() -> None:
             else:
                 positive_momentum = _momentum_input("dynamic_weight_positive", "비중 산출용 절대모멘텀")
 
+    with tabs[5]:
+        st.caption("공격자산에 남은 비중만 카나리아 신호에 따라 방어자산 또는 현금으로 전환합니다.")
+        risk_enabled = st.checkbox(
+            "위험 회피 옵션 A — 카나리아 ETF 사용",
+            key="dynamic_risk_enabled",
+            help="카나리아 ETF는 위험 신호 계산에만 사용되며 실제 투자자산으로 편입되지 않습니다.",
+        )
+        risk_tickers = list(st.session_state.get("dynamic_canary_tickers", []))
+        if risk_enabled:
+            _canary_selector(market)
+            risk_tickers = list(st.session_state.get("dynamic_canary_tickers", []))
+            risk_apply_mode = st.radio(
+                "위험 신호 적용 방식", CANARY_APPLY_MODES,
+                horizontal=True, key="dynamic_risk_apply_mode",
+                help="중립형은 위험 카나리아 비율만큼, 방어형은 하나라도 위험하면, 공격형은 모두 위험할 때 전환합니다.",
+            )
+            risk_direction = st.radio(
+                "위험 신호 방향", ["마이너스(-)", "플러스(+)"] ,
+                horizontal=True, key="dynamic_risk_direction",
+                help="선택한 모멘텀 값의 부호가 방향과 일치하면 위험 신호입니다. 정확히 0은 안전으로 처리합니다.",
+            )
+            risk_momentum_type = st.radio(
+                "카나리아 모멘텀 기준", ["절대 모멘텀", "상대 모멘텀"],
+                horizontal=True, key="dynamic_risk_momentum_type",
+            )
+            risk_same_momentum = st.checkbox(
+                "투자자산 선택기준과 동일 모멘텀 적용",
+                key="dynamic_risk_same_momentum",
+                help="체크하면 투자자산 선택 탭의 산출 기준·기간·계산식을 사용합니다.",
+            )
+            risk_custom_momentum = (
+                _momentum_input("dynamic_risk_custom", "카나리아 모멘텀")
+                if not risk_same_momentum else MomentumConfig()
+            )
+        else:
+            risk_apply_mode = st.session_state.get("dynamic_risk_apply_mode", "중립형")
+            risk_direction = st.session_state.get("dynamic_risk_direction", "마이너스(-)")
+            risk_momentum_type = st.session_state.get("dynamic_risk_momentum_type", "절대 모멘텀")
+            risk_same_momentum = True
+            risk_custom_momentum = MomentumConfig()
+
     back_col, result_col = st.columns(2)
     with back_col:
         go_back = st.button("뒤로", key="back_dynamic_portfolio", use_container_width=True)
@@ -437,6 +554,15 @@ def _render_conditions() -> None:
         "negative_momentum": negative_momentum,
         "positive_same_momentum": bool(positive_same_momentum),
         "positive_momentum": positive_momentum,
+        "risk_avoidance": {
+            "enabled": bool(risk_enabled),
+            "tickers": risk_tickers,
+            "apply_mode": risk_apply_mode,
+            "direction": risk_direction,
+            "momentum_type": risk_momentum_type,
+            "same_momentum": bool(risk_same_momentum),
+            "custom_momentum": risk_custom_momentum,
+        },
         "use_transaction_cost": bool(use_cost), "transaction_cost_rate": float(cost_rate / 100.0),
     }
     try:

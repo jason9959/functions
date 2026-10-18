@@ -316,7 +316,13 @@ def render(result: dict[str, Any], config: dict[str, Any]) -> None:
             st.info("표시할 리밸런싱 이력이 없습니다.")
         else:
             display_history = history.copy()
-            for column in ["공격자산 비중", "방어자산 비중", "현금 비중", "턴오버"]:
+            for column in [
+                "공격자산 비중", "방어자산 비중", "현금 비중", "턴오버",
+                "카나리아 전환율", "카나리아 전환 비중",
+                "카나리아 적용 전 공격자산 비중", "카나리아 적용 후 공격자산 비중",
+            ]:
+                if column not in display_history:
+                    continue
                 display_history[column] = display_history[column].map(lambda value: f"{value:.1%}")
             display_history["거래비용"] = display_history["거래비용"].map(lambda value: f"{value:,.0f}")
             st.dataframe(display_history.iloc[::-1], hide_index=True, use_container_width=True, height=360)
@@ -337,6 +343,15 @@ def render(result: dict[str, Any], config: dict[str, Any]) -> None:
                         lambda value: "-" if pd.isna(value) else f"{float(value):.1%}"
                     )
             st.dataframe(detail, hide_index=True, use_container_width=True)
+            canary_audit = result.get("canary_audits", {}).get(selected_date)
+            if canary_audit is not None and not canary_audit.empty:
+                st.subheader("카나리아 위험 회피 상세")
+                canary_show = canary_audit.copy()
+                if "모멘텀 값" in canary_show:
+                    canary_show["모멘텀 값"] = canary_show["모멘텀 값"].map(
+                        lambda value: "-" if pd.isna(value) else f"{float(value):.2%}"
+                    )
+                st.dataframe(canary_show, hide_index=True, use_container_width=True)
             st.subheader("최종 배분 검증")
             total = sum(result["final_weights"].values())
             st.success(f"공격자산·방어자산·현금 비중 합계: {total:.1%}")

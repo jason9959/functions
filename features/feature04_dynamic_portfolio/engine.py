@@ -316,6 +316,99 @@ def _defense_allocation(
     return weights, audit
 
 
+def _canary_momentum_config(config: dict[str, Any], risk: dict[str, Any]) -> MomentumConfig:
+    """Resolve the canary signal calculation from the attack settings."""
+    if not risk.get("same_momentum", True):
+        return risk["custom_momentum"]
+
+    attack_mode = config.get("attack_mode", "")
+    if risk.get("momentum_type") == "절대 모멘텀" and attack_mode in _ATTACK_ABSOLUTE_MODES:
+        return config["attack_absolute"]
+    if risk.get("momentum_type") == "상대 모멘텀" and attack_mode in {
+        "상대 모멘텀", "상대 & 절대 모멘텀", "상대 & 절대 모멘텀 + 방어 스위치",
+    }:
+        return config["attack_relative"]
+    # If the selected attack mode has no corresponding calculation, reuse the
+    # available attack setting instead of inventing a second formula.
+    return config["attack_absolute"] if attack_mode in _ATTACK_ABSOLUTE_MODES else config["attack_relative"]
+
+
+def _apply_canary_overlay(
+    prices: pd.DataFrame,
+    signal_date: pd.Timestamp,
+    attack_weights: dict[str, float],
+    config: dict[str, Any],
+) -> tuple[dict[str, float], float, dict[str, Any]]:
+    """Apply the canary risk overlay to the remaining attack allocation."""
+    risk = config.get("risk_avoidance") or {}
+    if not risk.get("enabled"):
+        return attack_weights, 0.0, {"enabled": False, "audit": pd.DataFrame()}
+
+    tickers = list(dict.fromkeys(risk.get("tickers", [])))
+    if not tickers:
+        raise ValueError("위험 회피 옵션을 켠 경우 카나리아 ETF를 한 개 이상 선택해주세요.")
+
+    momentum = _canary_momentum_config(config, risk)
+    direction = risk.get("direction", "마이너스(-)")
+    audit: list[dict[str, Any]] = []
+    for ticker in tickers:
+        if ticker not in prices.columns:
+            raise ValueError(f"카나리아 {ticker}의 가격 데이터가 없습니다.")
+        series = prices[ticker].dropna()
+        try:
+            detail = momentum_detail(series, signal_date, momentum)
+        except ValueError as error:
+            available = "데이터 없음"
+            if not series.empty:
+                available = f"{series.index.min():%Y-%m-%d} ~ {series.index.max():%Y-%m-%d}"
+            raise ValueError(
+                f"카나리아 {ticker}의 모멘텀 계산에 필요한 과거 데이터가 부족합니다. "
+                f"필요 기준: {momentum.kind} {momentum.months if momentum.kind != '모멘텀 스코어' else momentum.score_type}, "
+                f"확보 기간: {available}"
+            ) from error
+        value = float(detail["계산값"])
+        danger = value < 0 if direction == "마이너스(-)" else value > 0
+        audit.append(
+            {
+                "티커": ticker,
+                "산출 기준": momentum.kind,
+                "기준 기간": detail.get("기준 기간", "-"),
+                "모멘텀 값": value,
+                "위험 판정": danger,
+                "데이터 유효": True,
+            }
+        )
+
+    risk_count = sum(bool(row["위험 판정"]) for row in audit)
+    valid_count = len(audit)
+    apply_mode = risk.get("apply_mode", "중립형")
+    if apply_mode == "방어형":
+        conversion = 1.0 if risk_count > 0 else 0.0
+    elif apply_mode == "공격형":
+        conversion = 1.0 if risk_count == valid_count else 0.0
+    else:
+        conversion = risk_count / valid_count if valid_count else 0.0
+
+    before_attack = sum(weight for ticker, weight in attack_weights.items() if ticker != CASH)
+    moved = before_attack * conversion
+    adjusted = {
+        ticker: weight * (1.0 - conversion) if ticker != CASH else weight
+        for ticker, weight in attack_weights.items()
+    }
+    summary = {
+        "enabled": True,
+        "audit": pd.DataFrame(audit),
+        "risk_count": risk_count,
+        "valid_count": valid_count,
+        "apply_mode": apply_mode,
+        "conversion": conversion,
+        "before_attack": before_attack,
+        "after_attack": sum(weight for ticker, weight in adjusted.items() if ticker != CASH),
+        "moved": moved,
+    }
+    return adjusted, moved, summary
+
+
 def _previous_market_date(index: pd.DatetimeIndex, date: pd.Timestamp) -> pd.Timestamp:
     candidates = index[index < date]
     if not len(candidates):
@@ -372,6 +465,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
     values, invested, flows, nav_returns = [], [], [], []
     history: list[dict[str, Any]] = []
     candidate_snapshots: dict[str, pd.DataFrame] = {}
+    canary_audits: dict[str, pd.DataFrame] = {}
     target_weights: dict[str, float] = {CASH: 1.0}
     previous_attack: set[str] = set()
     previous_defense: set[str] = set()
@@ -429,8 +523,21 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                 config["attack_mode"], attack_base, attack_rows,
                 config["attack_select_count"], previous_attack, config["attack_tickers"], attack_bil,
             )
+            pre_canary_attack_weights = attack_weights.copy()
+            attack_weights, canary_moved, canary_summary = _apply_canary_overlay(
+                prices, signal_date, attack_weights, config,
+            )
+            for row in attack_audit:
+                ticker = row.get("티커")
+                before_weight = pre_canary_attack_weights.get(ticker, 0.0)
+                after_weight = attack_weights.get(ticker, 0.0)
+                row["카나리아 전환 전 비중"] = before_weight
+                row["카나리아 전환 비중"] = max(0.0, before_weight - after_weight)
+                row["최종 목표 비중"] = after_weight
+                if row.get("카나리아 전환 비중", 0.0) > 0:
+                    row["결과 사유"] = f"{row.get('결과 사유', '')} · 카나리아 전환"
             base_defense = 1.0 - attack_base
-            fixed_and_switched = base_defense + switched_amount
+            fixed_and_switched = base_defense + switched_amount + canary_moved
             defense_weights: dict[str, float] = {}
             defense_audit: list[dict[str, Any]] = []
             if fixed_and_switched > 0:
@@ -483,6 +590,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
             rows = attack_audit + defense_audit
             snapshot_key = date.strftime("%Y-%m-%d")
             candidate_snapshots[snapshot_key] = pd.DataFrame(rows)
+            canary_audits[snapshot_key] = canary_summary["audit"]
             history.append(
                 {
                     "예정일": schedule_map[date].date(),
@@ -494,6 +602,13 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                     "현금 비중": new_weights.get(CASH, 0.0),
                     "포트폴리오 비중 방식": weight_mode,
                     "비중 판정": weight_summary,
+                    "카나리아 위험 회피": "미사용" if not canary_summary["enabled"] else canary_summary["apply_mode"],
+                    "카나리아 위험 수": canary_summary.get("risk_count", 0),
+                    "카나리아 수": canary_summary.get("valid_count", 0),
+                    "카나리아 전환율": canary_summary.get("conversion", 0.0),
+                    "카나리아 전환 비중": canary_summary.get("moved", 0.0),
+                    "카나리아 적용 전 공격자산 비중": canary_summary.get("before_attack", 0.0),
+                    "카나리아 적용 후 공격자산 비중": canary_summary.get("after_attack", 0.0),
                     "턴오버": 0.0 if date == start_actual else turnover,
                     "거래비용": fee,
                     "평가금액": after_value,
@@ -536,6 +651,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
         "drawdown": drawdown.rename("포트폴리오"),
         "history": pd.DataFrame(history),
         "candidate_snapshots": candidate_snapshots,
+        "canary_audits": canary_audits,
         "final_weights": target_weights,
         "annual_turnover": turnover_sum / years,
         "common_start": start_actual,
