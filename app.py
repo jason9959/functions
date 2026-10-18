@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# Streamlit Cloud build marker: 2026-10-18 canary risk-avoidance tab.
 from common.metric_ui import metric as render_metric, metric_dataframe
 import yfinance as yf
 
