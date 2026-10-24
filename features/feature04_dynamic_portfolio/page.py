@@ -519,7 +519,16 @@ def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
     local workbook cache or ``SHILLER_DIVIDEND_CSV`` override can be used when
     the remote workbook is temporarily unavailable.
     """
-    source_url = "https://www.econ.yale.edu/~shiller/data/ie_data.xls"
+    # Yale occasionally blocks cloud-hosted egress.  These mirrors contain the
+    # same Robert Shiller workbook and keep the preset usable on Streamlit Cloud.
+    source_urls = (
+        "https://www.econ.yale.edu/~shiller/data/ie_data.xls",
+        "https://raw.githubusercontent.com/jamesplease/stock-market-data/master/ie_data.xls",
+        "https://raw.githubusercontent.com/jamesplease/stock-market-data/main/ie_data.xls",
+        "https://posix4e.github.io/shiller_wrapper_data/ie_data.xls",
+        "https://shillerdata.com/ie_data.xls",
+    )
+    source_url = source_urls[0]
     cache_dir = Path(".cache")
     cache_path = cache_dir / "shiller_ie_data.xls"
     csv_override = Path(os.environ["SHILLER_DIVIDEND_CSV"]) if os.environ.get("SHILLER_DIVIDEND_CSV") else None
@@ -529,18 +538,27 @@ def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
         frame = pd.read_csv(csv_override)
         source = str(csv_override)
     else:
-        try:
-            response = requests.get(source_url, timeout=(8, 30), headers={"User-Agent": "stock-simulator/1.0"})
-            response.raise_for_status()
-            payload = response.content
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(payload)
-        except (requests.RequestException, OSError) as error:
+        last_error: Exception | None = None
+        for candidate_url in source_urls:
+            try:
+                response = requests.get(candidate_url, timeout=(8, 30), headers={"User-Agent": "stock-simulator/1.0"})
+                response.raise_for_status()
+                if not response.content:
+                    raise ValueError("빈 응답입니다.")
+                payload = response.content
+                source_url = candidate_url
+                source = candidate_url
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(payload)
+                break
+            except (requests.RequestException, OSError, ValueError) as error:
+                last_error = error
+        if payload is None:
             if not cache_path.exists():
                 raise ValueError(
-                    "Yale Shiller 배당 데이터 다운로드에 실패했고 검증된 로컬 캐시도 없습니다. "
+                    "Yale Shiller 배당 데이터와 공개 미러 다운로드에 실패했고 검증된 로컬 캐시도 없습니다. "
                     "SHILLER_DIVIDEND_CSV 환경변수로 Date,Price,Dividend CSV를 지정할 수 있습니다."
-                ) from error
+                ) from last_error
             payload = cache_path.read_bytes()
             source = str(cache_path)
         try:
