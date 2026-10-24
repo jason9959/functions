@@ -40,6 +40,7 @@ CANARY_APPLY_MODES = ["중립형", "방어형", "공격형"]
 MARKET_SIGNAL_LABELS = [
     "장단기 금리차 역전 (10년-2년)",
     "S&P500 배당수익률",
+    "장단기 금리차 역전 (10년-3개월)",
     "실업률",
     "실업률 & SPY (GTT-UE)",
     "삼의 법칙 (Sahm's Rule)",
@@ -92,8 +93,12 @@ RESEARCH_PRESETS = {
         "dynamic_fixed_defense": False,
         "risk_enabled": False,
         "canary_tickers": [],
-        "market_risk_enabled": False,
-        "market_risk_signals": [],
+        "market_risk_enabled": True,
+        "market_risk_signals": ["장단기 금리차 역전 (10년-3개월)", "S&P500 배당수익률"],
+        "spread_lag": 7,
+        "spread_active": 8,
+        "spread_threshold": -0.5,
+        "dividend_threshold": 1.6,
     },
 }
 validate_preset_market_signals(RESEARCH_PRESETS, required_by_presets=MARKET_SIGNAL_REQUIRED_BY_PRESETS)
@@ -137,6 +142,13 @@ def _default_form() -> dict[str, Any]:
         "dynamic_market_risk_signals": [],
         "dynamic_market_spread_lag": 0,
         "dynamic_market_spread_active": 3,
+        "dynamic_market_spread_threshold": 0.0,
+        "dynamic_market_spread_lag_10년-2년": 0,
+        "dynamic_market_spread_active_10년-2년": 3,
+        "dynamic_market_spread_threshold_10년-2년": 0.0,
+        "dynamic_market_spread_lag_10년-3개월": 7,
+        "dynamic_market_spread_active_10년-3개월": 8,
+        "dynamic_market_spread_threshold_10년-3개월": -0.5,
         "dynamic_market_dividend_threshold": 1.32,
         "dynamic_market_unemployment_months": 12,
         "dynamic_use_transaction_cost": False,
@@ -203,6 +215,15 @@ def _apply_research_preset(name: str) -> None:
         "dynamic_market_risk_enabled": preset.get("market_risk_enabled", False),
         "dynamic_market_risk_combine": "OR",
         "dynamic_market_risk_signals": list(preset.get("market_risk_signals", [])),
+        "dynamic_market_spread_lag": preset.get("spread_lag", 0),
+        "dynamic_market_spread_active": preset.get("spread_active", 3),
+        "dynamic_market_spread_threshold": preset.get("spread_threshold", 0.0),
+        "dynamic_market_spread_lag_10년-2년": preset.get("spread_lag_2y", 0),
+        "dynamic_market_spread_active_10년-2년": preset.get("spread_active_2y", 3),
+        "dynamic_market_spread_threshold_10년-2년": preset.get("spread_threshold_2y", 0.0),
+        "dynamic_market_spread_lag_10년-3개월": preset.get("spread_lag", 7),
+        "dynamic_market_spread_active_10년-3개월": preset.get("spread_active", 8),
+        "dynamic_market_spread_threshold_10년-3개월": preset.get("spread_threshold", -0.5),
         "dynamic_market_dividend_threshold": preset.get("dividend_threshold", 1.32),
         "dynamic_cash_replacement": False,
         "dynamic_show_results": False,
@@ -576,7 +597,9 @@ def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[s
         return {}
     needed = set()
     if any("10년-2년" in label for label in signals):
-        needed.update({"DGS10", "DGS2"})
+        needed.update({"T10Y2Y", "DGS10", "DGS2"})
+    if any("10년-3개월" in label for label in signals):
+        needed.update({"T10Y3M", "T10Y3MM", "DGS10", "DGS3MO"})
     if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
         needed.add("UNRATE")
     data = {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed) if series_id != "SP500_DIV_YIELD"}
@@ -893,14 +916,29 @@ def _render_conditions() -> None:
                     elif checked:
                         selected_signals.append(label)
             market_risk_signals = selected_signals
-            spread_lag = st.number_input(
-                "금리차 반영 지연 (개월)", min_value=0, max_value=12, step=1,
-                key="dynamic_market_spread_lag", disabled=not any("금리차" in label for label in market_risk_signals),
-            )
-            spread_active = st.number_input(
-                "금리차 신호 유지 기간 (개월)", min_value=1, max_value=24, step=1,
-                key="dynamic_market_spread_active", disabled=not any("금리차" in label for label in market_risk_signals),
-            )
+            spread_settings = {}
+            for setting_key, setting_label, default_lag, default_active, default_threshold in (
+                ("10년-2년", "10년-2년", 0, 3, 0.0),
+                ("10년-3개월", "10년-3개월", 7, 8, -0.5),
+            ):
+                enabled = any(setting_label in label for label in market_risk_signals)
+                st.markdown(f"**{setting_label} 금리차 설정**")
+                lag_value = st.number_input(
+                    f"{setting_label} 반영 지연 (개월)", min_value=0, max_value=24, step=1,
+                    key=f"dynamic_market_spread_lag_{setting_key}", disabled=not enabled,
+                )
+                active_value = st.number_input(
+                    f"{setting_label} 신호 유지 기간 (개월)", min_value=1, max_value=24, step=1,
+                    key=f"dynamic_market_spread_active_{setting_key}", disabled=not enabled,
+                )
+                threshold_value = st.number_input(
+                    f"{setting_label} 역전 임계값 (%p)", min_value=-10.0, max_value=10.0, step=0.1,
+                    key=f"dynamic_market_spread_threshold_{setting_key}", disabled=not enabled,
+                    help="값이 임계값보다 작을 때만 위험 신호입니다. 정확히 같은 값은 안전으로 처리합니다.",
+                )
+                spread_settings[setting_key] = {
+                    "lag": int(lag_value), "active": int(active_value), "threshold": float(threshold_value),
+                }
             dividend_threshold = st.number_input(
                 "S&P500 배당수익률 기준 (%)", min_value=0.0, max_value=20.0, step=0.01,
                 key="dynamic_market_dividend_threshold", disabled="S&P500 배당수익률" not in market_risk_signals,
@@ -914,8 +952,18 @@ def _render_conditions() -> None:
                 st.info("시장 위험 신호를 하나 이상 선택해주세요.")
         else:
             market_risk_combine = st.session_state.get("dynamic_market_risk_combine", "OR")
-            spread_lag = st.session_state.get("dynamic_market_spread_lag", 0)
-            spread_active = st.session_state.get("dynamic_market_spread_active", 3)
+            spread_settings = {
+                "10년-2년": {
+                    "lag": st.session_state.get("dynamic_market_spread_lag_10년-2년", 0),
+                    "active": st.session_state.get("dynamic_market_spread_active_10년-2년", 3),
+                    "threshold": st.session_state.get("dynamic_market_spread_threshold_10년-2년", 0.0),
+                },
+                "10년-3개월": {
+                    "lag": st.session_state.get("dynamic_market_spread_lag_10년-3개월", 7),
+                    "active": st.session_state.get("dynamic_market_spread_active_10년-3개월", 8),
+                    "threshold": st.session_state.get("dynamic_market_spread_threshold_10년-3개월", -0.5),
+                },
+            }
             dividend_threshold = st.session_state.get("dynamic_market_dividend_threshold", 1.32)
             unemployment_months = st.session_state.get("dynamic_market_unemployment_months", 12)
 
@@ -975,8 +1023,7 @@ def _render_conditions() -> None:
             "enabled": bool(market_risk_enabled),
             "combine": market_risk_combine,
             "signals": market_risk_signals,
-            "spread_lag_months": int(spread_lag),
-            "spread_active_months": int(spread_active),
+            "spread_settings": spread_settings,
             "dividend_threshold": float(dividend_threshold),
             "unemployment_months": int(unemployment_months),
         },

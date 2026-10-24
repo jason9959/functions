@@ -24,8 +24,9 @@ SCORE_PERIODS = {
 FREQUENCY_MONTHS = {"월별": 1, "분기": 3, "반기": 6, "연별": 12}
 CONTRIBUTION_MONTHS = {"매월": 1, "매분기": 3, "매년": 12}
 MARKET_SIGNAL_TESTED = {
-    "장단기 금리차 역전 (10년-2년)": False,
+    "장단기 금리차 역전 (10년-2년)": True,
     "S&P500 배당수익률": True,
+    "장단기 금리차 역전 (10년-3개월)": True,
     "실업률": False,
     "실업률 & SPY (GTT-UE)": False,
     "삼의 법칙 (Sahm's Rule)": False,
@@ -33,7 +34,7 @@ MARKET_SIGNAL_TESTED = {
 }
 # Calculated from the current research presets. Required-by-preset options
 # stay selectable even when their standalone test coverage is incomplete.
-MARKET_SIGNAL_REQUIRED_BY_PRESETS = {"S&P500 배당수익률"}
+MARKET_SIGNAL_REQUIRED_BY_PRESETS = {"S&P500 배당수익률", "장단기 금리차 역전 (10년-3개월)"}
 MARKET_SIGNAL_SUPPORT = {
     signal: tested or signal in MARKET_SIGNAL_REQUIRED_BY_PRESETS
     for signal, tested in MARKET_SIGNAL_TESTED.items()
@@ -502,8 +503,7 @@ def _market_signal_details(
     if not labels:
         raise ValueError("시장 데이터 위험 회피 옵션을 켠 경우 신호를 한 개 이상 선택해주세요.")
     rows: list[dict[str, Any]] = []
-    lag = int(risk.get("spread_lag_months", 0))
-    active_months = int(risk.get("spread_active_months", 3))
+    spread_settings = risk.get("spread_settings") or {}
     unemployment_months = int(risk.get("unemployment_months", 12))
 
     def monthly(series: pd.Series) -> pd.Series:
@@ -526,14 +526,43 @@ def _market_signal_details(
         value: float | None = None
         basis = ""
         if "금리차" in label:
-            short_key = "DGS2"
-            short_label = "2년"
-            dgs10, short_rate = data["DGS10"], data[short_key]
-            spread = dgs10.reindex(dgs10.index.union(short_rate.index)).ffill() - short_rate.reindex(dgs10.index.union(short_rate.index)).ffill()
-            target = signal_date - pd.DateOffset(months=lag)
+            is_three_month = "10년-3개월" in label
+            defaults = {"lag": 7, "active": 8, "threshold": -0.5} if is_three_month else {"lag": 0, "active": 3, "threshold": 0.0}
+            setting_key = "10년-3개월" if is_three_month else "10년-2년"
+            setting = {**defaults, **spread_settings.get(setting_key, {})}
+            lag = int(setting["lag"])
+            active_months = int(setting["active"])
+            threshold = float(setting["threshold"])
+            direct_key = "T10Y3M" if is_three_month else "T10Y2Y"
+            monthly_direct_key = "T10Y3MM" if is_three_month else None
+            short_key = "DGS3MO" if is_three_month else "DGS2"
+            short_label = "3개월" if is_three_month else "2년"
+            if direct_key in data:
+                spread = data[direct_key]
+                source = direct_key
+            elif monthly_direct_key and monthly_direct_key in data:
+                spread = data[monthly_direct_key]
+                source = monthly_direct_key
+            else:
+                dgs10, short_rate = data["DGS10"], data[short_key]
+                spread = dgs10.reindex(dgs10.index.union(short_rate.index)).ffill() - short_rate.reindex(dgs10.index.union(short_rate.index)).ffill()
+                source = f"DGS10-{short_key}"
             spread_monthly = monthly(spread)
+            if is_three_month:
+                target = (signal_date.to_period("M") - lag).to_timestamp("M")
+            else:
+                target = signal_date - pd.DateOffset(months=lag)
             observed_date, value = _market_asof(spread_monthly, target)
-            dates = [target - pd.DateOffset(months=offset) for offset in range(max(1, active_months))]
+            if is_three_month:
+                # An event in month E activates from E+lag through the next
+                # active_months-1 monthly decisions. At T, inspect T-lag-
+                # (active_months-1) through T-lag inclusively.
+                dates = [
+                    (signal_date.to_period("M") - lag - offset).to_timestamp("M")
+                    for offset in range(max(1, active_months))
+                ]
+            else:
+                dates = [target - pd.DateOffset(months=offset) for offset in range(max(1, active_months))]
             observations = []
             for date in dates:
                 try:
@@ -542,8 +571,8 @@ def _market_signal_details(
                     observations = []
                     break
                 observations.append((observed, spread_value))
-            active = len(observations) == max(1, active_months) and all(spread_value < 0 for _, spread_value in observations)
-            basis = f"{lag}개월 전 {short_label} 금리차 {value:.2f}%p · 최근 {active_months}개월 모두 음수"
+            active = len(observations) == max(1, active_months) and any(spread_value < threshold for _, spread_value in observations)
+            basis = f"{lag}개월 지연 {short_label} 금리차 {value:.2f}%p < {threshold:.2f}%p · {active_months}개월 이벤트 창 · 출처 {source}"
         elif label == "S&P500 배당수익률":
             # Shiller's monthly observation is published after month-end; use
             # it from the following month's decision onward.
@@ -593,6 +622,8 @@ def _market_signal_details(
             "원시값": value,
             "위험 판정": bool(active),
             "판정 근거": basis,
+            "임계값": threshold if "금리차" in label else None,
+            "신호 출처": source if "금리차" in label else "",
         })
     return rows
 

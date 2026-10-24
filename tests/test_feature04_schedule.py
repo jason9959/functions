@@ -126,6 +126,33 @@ class ScheduledTradeDatesTests(unittest.TestCase):
         self.assertTrue(result[0]["위험 판정"])
         self.assertIn("2년", result[0]["판정 근거"])
 
+    def test_ten_year_three_month_delay_threshold_and_duration(self):
+        index = pd.date_range("2020-01-01", "2023-12-31", freq="D")
+        monthly = pd.date_range("2020-01-31", "2023-12-31", freq="M")
+        prices = pd.DataFrame({"SPY": 100.0}, index=index)
+        spread = pd.Series(0.0, index=monthly)
+        # Event at 2022-01 is active at T=2022-08 through 2023-03
+        spread.loc["2022-01-31"] = -0.500001
+        data = {
+            "DGS10": pd.Series(4.0, index=monthly),
+            "DGS3MO": pd.Series(2.0, index=monthly),
+            "T10Y3MM": spread,
+        }
+        config = {
+            "market_risk": {
+                "signals": ["장단기 금리차 역전 (10년-3개월)"],
+                "spread_lag_months": 7,
+                "spread_active_months": 8,
+                "spread_threshold": -0.5,
+            },
+            "_market_data": data,
+        }
+        self.assertTrue(_market_signal_details(prices, pd.Timestamp("2022-08-15"), config)[0]["위험 판정"])
+        self.assertFalse(_market_signal_details(prices, pd.Timestamp("2022-07-15"), config)[0]["위험 판정"])
+        self.assertFalse(_market_signal_details(prices, pd.Timestamp("2023-04-15"), config)[0]["위험 판정"])
+        spread.loc["2022-01-31"] = -0.5
+        self.assertFalse(_market_signal_details(prices, pd.Timestamp("2022-08-15"), config)[0]["위험 판정"])
+
     def test_market_or_and_combination_uses_each_signal(self):
         index = pd.date_range("2020-01-01", "2021-12-31", freq="D")
         monthly = pd.date_range("2020-01-31", "2021-12-31", freq="M")
