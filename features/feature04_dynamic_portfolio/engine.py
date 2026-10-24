@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import calendar
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +23,62 @@ SCORE_PERIODS = {
 }
 FREQUENCY_MONTHS = {"월별": 1, "분기": 3, "반기": 6, "연별": 12}
 CONTRIBUTION_MONTHS = {"매월": 1, "매분기": 3, "매년": 12}
+MARKET_SIGNAL_TESTED = {
+    "장단기 금리차 역전 (10년-2년)": False,
+    "S&P500 배당수익률": True,
+    "실업률": False,
+    "실업률 & SPY (GTT-UE)": False,
+    "삼의 법칙 (Sahm's Rule)": False,
+    "삼의 법칙과 SPY 모멘텀": False,
+}
+# Calculated from the current research presets. Required-by-preset options
+# stay selectable even when their standalone test coverage is incomplete.
+MARKET_SIGNAL_REQUIRED_BY_PRESETS = {"S&P500 배당수익률"}
+MARKET_SIGNAL_SUPPORT = {
+    signal: tested or signal in MARKET_SIGNAL_REQUIRED_BY_PRESETS
+    for signal, tested in MARKET_SIGNAL_TESTED.items()
+}
+
+
+def normalize_market_signals(signals: list[str] | tuple[str, ...], *, allow_unverified: bool = False) -> list[str]:
+    """Validate market signals at the engine boundary.
+
+    The internal escape hatch is intentionally environment-driven and is not
+    exposed in the normal Streamlit UI.
+    """
+    selected = list(dict.fromkeys(signals))
+    unknown = [signal for signal in selected if signal not in MARKET_SIGNAL_SUPPORT]
+    unsupported = [signal for signal in selected if not MARKET_SIGNAL_SUPPORT.get(signal, False)]
+    if (unknown or (unsupported and not allow_unverified)):
+        names = ", ".join(unknown + unsupported)
+        raise ValueError(f"아직 검증되지 않아 일반 실행에서 지원하지 않는 시장 신호입니다: {names}")
+    return selected
+
+
+def validate_preset_market_signals(
+    presets: dict[str, dict[str, Any]],
+    *,
+    required_by_presets: set[str] | None = None,
+) -> None:
+    """Fail fast if a research preset contains an unsupported signal."""
+    for name, preset in presets.items():
+        signals = preset.get("market_risk_signals", [])
+        required = required_by_presets or set()
+        invalid = [
+            signal for signal in signals
+            if not MARKET_SIGNAL_TESTED.get(signal, False) and signal not in required
+        ]
+        if invalid:
+            raise ValueError(f"프리셋 {name}에 미검증 시장 신호가 포함되어 있습니다: {', '.join(invalid)}")
+
+
+def resolve_recent_period(today: dt.date, years: int) -> tuple[dt.date, dt.date]:
+    """Return a calendar-safe recent period without mutating UI dates."""
+    try:
+        start = today.replace(year=today.year - int(years))
+    except ValueError:
+        start = today.replace(year=today.year - int(years), day=28)
+    return start, today
 
 
 @dataclass(frozen=True)
@@ -96,17 +154,35 @@ def scheduled_trade_dates(
     end_date: pd.Timestamp,
     frequency: str,
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Map start-anchored calendar dates to the nearest previous market date."""
+    """Map calendar-period starts to the first available market date.
+
+    The schedule preserves the requested start-day-of-month. If that calendar
+    day is a holiday or weekend, the first available session after it is used.
+    Each actual session is constrained to its own planned period, so a later
+    period's close can never be pulled backward into an earlier decision.
+    """
     months = FREQUENCY_MONTHS[frequency]
+    start_date = pd.Timestamp(start_date)
+    end_date = pd.Timestamp(end_date)
+    anchor = start_date
+
+    def add_months_preserving_day(value: pd.Timestamp, offset: int) -> pd.Timestamp:
+        month_index = value.year * 12 + (value.month - 1) + offset
+        year, month_zero_based = divmod(month_index, 12)
+        month = month_zero_based + 1
+        day = min(value.day, calendar.monthrange(year, month)[1])
+        return pd.Timestamp(year=year, month=month, day=day)
+
     dates: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     step = 0
     while True:
-        planned = start_date + pd.DateOffset(months=months * step)
+        planned = add_months_preserving_day(anchor, months * step)
         if planned > end_date:
             break
-        candidates = index[index <= planned]
+        next_planned = add_months_preserving_day(anchor, months * (step + 1))
+        candidates = index[(index >= planned) & (index < next_planned)]
         if len(candidates):
-            actual = pd.Timestamp(candidates[-1])
+            actual = pd.Timestamp(candidates[0])
             if not dates or actual != dates[-1][1]:
                 dates.append((planned, actual))
         step += 1
@@ -120,7 +196,7 @@ def _ranked(
     return sorted(
         values,
         key=lambda ticker: (
-            -round(values[ticker], 12),
+            -values[ticker],
             0 if ticker in previous else 1,
             order.get(ticker, 10_000),
         ),
@@ -450,29 +526,41 @@ def _market_signal_details(
         value: float | None = None
         basis = ""
         if "금리차" in label:
-            dgs10, dgs2 = data["DGS10"], data["DGS2"]
-            spread = dgs10.reindex(dgs10.index.union(dgs2.index)).ffill() - dgs2.reindex(dgs10.index.union(dgs2.index)).ffill()
+            short_key = "DGS2"
+            short_label = "2년"
+            dgs10, short_rate = data["DGS10"], data[short_key]
+            spread = dgs10.reindex(dgs10.index.union(short_rate.index)).ffill() - short_rate.reindex(dgs10.index.union(short_rate.index)).ffill()
             target = signal_date - pd.DateOffset(months=lag)
             spread_monthly = monthly(spread)
-            _, value = _market_asof(spread_monthly, target)
+            observed_date, value = _market_asof(spread_monthly, target)
             dates = [target - pd.DateOffset(months=offset) for offset in range(max(1, active_months))]
-            active = any(
-                _market_asof(spread_monthly, date)[1] < 0
-                for date in dates
-                if not spread_monthly.loc[:date].dropna().empty
-            )
-            basis = f"{lag}개월 전 금리차 {value:.2f}%p · {active_months}개월 유지"
+            observations = []
+            for date in dates:
+                try:
+                    observed, spread_value = _market_asof(spread_monthly, date)
+                except ValueError:
+                    observations = []
+                    break
+                observations.append((observed, spread_value))
+            active = len(observations) == max(1, active_months) and all(spread_value < 0 for _, spread_value in observations)
+            basis = f"{lag}개월 전 {short_label} 금리차 {value:.2f}%p · 최근 {active_months}개월 모두 음수"
         elif label == "S&P500 배당수익률":
-            _, value = _market_asof(data["SP500_DIV_YIELD"], signal_date)
+            # Shiller's monthly observation is published after month-end; use
+            # it from the following month's decision onward.
+            observed_date, value = _market_asof(
+                data["SP500_DIV_YIELD"], signal_date - pd.DateOffset(months=1)
+            )
             threshold = float(risk.get("dividend_threshold", 1.32))
             active = value < threshold
             basis = f"현재 {value:.2f}% < 기준 {threshold:.2f}%"
         elif label == "실업률":
             active, current, average = unemployment_state()
+            observed_date, _ = _market_asof(monthly(data["UNRATE"]), signal_date)
             value = current
             basis = f"현재 {current:.2f}% · 이전 평균 {average:.2f}%"
         elif label == "실업률 & SPY (GTT-UE)":
             unemployment_active, current, average = unemployment_state()
+            observed_date, _ = _market_asof(monthly(data["UNRATE"]), signal_date)
             spy = prices["SPY"].dropna()
             _, spy_current = _market_asof(spy, signal_date)
             _, spy_ma = _market_asof(spy.loc[:signal_date].rolling(210, min_periods=100).mean().dropna(), signal_date)
@@ -481,7 +569,7 @@ def _market_signal_details(
             basis = f"실업률 {current:.2f}% / 평균 {average:.2f}% · SPY {spy_current:.2f} < MA {spy_ma:.2f}"
         elif label in {"삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}:
             series = monthly(data["UNRATE"])
-            _, current = _market_asof(series, signal_date)
+            observed_date, current = _market_asof(series, signal_date)
             rolling = series.rolling(3).mean().dropna()
             current_avg = _market_asof(rolling, signal_date)[1]
             prior = rolling.loc[:signal_date].iloc[:-1]
@@ -499,7 +587,13 @@ def _market_signal_details(
                 _, spy_ma = _market_asof(spy.loc[:signal_date].rolling(210, min_periods=100).mean().dropna(), signal_date)
                 active = sahm and spy_current < spy_ma
                 basis += f" · SPY {spy_current:.2f} < MA {spy_ma:.2f}"
-        rows.append({"시장 신호": label, "원시값": value, "위험 판정": bool(active), "판정 근거": basis})
+        rows.append({
+            "시장 신호": label,
+            "관찰일": observed_date,
+            "원시값": value,
+            "위험 판정": bool(active),
+            "판정 근거": basis,
+        })
     return rows
 
 
@@ -536,14 +630,30 @@ def _previous_market_date(index: pd.DatetimeIndex, date: pd.Timestamp) -> pd.Tim
 
 def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
     """Run the strategy and preserve each rebalance decision snapshot."""
+    market_risk = dict(config.get("market_risk") or {})
+    allow_unverified = os.environ.get("DYNAMIC_ENABLE_UNVERIFIED_SIGNALS") == "1"
+    market_risk["signals"] = normalize_market_signals(
+        market_risk.get("signals", []), allow_unverified=allow_unverified
+    )
+    config = dict(config)
+    config["market_risk"] = market_risk
     # Keep the unfilled frame for the common-period calculation.  If we filled
     # first, a stale last quote could make a ticker appear to have data beyond
     # its actual end date and the backtest would silently use a shorter/invalid
     # common period.
     raw_prices = prices.sort_index().astype(float)
+    raw_execution = config.get("execution_prices")
+    if raw_execution is None:
+        raw_execution = raw_prices.copy()
+    else:
+        raw_execution = raw_execution.sort_index().astype(float)
     requested_start = pd.Timestamp(config["start_date"])
     requested_end = pd.Timestamp(config["end_date"])
-    required_tickers = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
+    cash_replacement = config.get("cash_replacement_ticker")
+    required_tickers = list(dict.fromkeys(
+        config["attack_tickers"] + config["defense_tickers"]
+        + ([cash_replacement] if cash_replacement else [])
+    ))
     missing_columns = [ticker for ticker in required_tickers if ticker not in raw_prices.columns]
     if missing_columns:
         raise ValueError("가격 데이터가 없는 종목: " + ", ".join(missing_columns))
@@ -553,7 +663,13 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
         raise ValueError("가격 데이터가 없는 종목: " + ", ".join(empty_tickers))
     valid_starts = [series.index.min() for series in nonempty.values()]
     valid_ends = [series.index.max() for series in nonempty.values()]
-    start = max([requested_start, *valid_starts])
+    common_data_start = max(valid_starts)
+    # Start on the first common session on or after the requested date. A
+    # holiday start is therefore executed on the next available session.
+    first_common = raw_prices.index[
+        (raw_prices.index >= requested_start) & (raw_prices.index >= common_data_start)
+    ]
+    start = pd.Timestamp(first_common[0]) if len(first_common) else max([requested_start, common_data_start])
     end = min([requested_end, *valid_ends])
     evaluation_index = raw_prices.index[(raw_prices.index >= start) & (raw_prices.index <= end)]
     if len(evaluation_index) < 2:
@@ -562,20 +678,24 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
     # for isolated missing observations; it cannot extend a ticker's usable
     # start or end date anymore.
     prices = raw_prices.ffill()
+    execution_prices = raw_execution.reindex(prices.index).ffill()
     start_actual, end_actual = pd.Timestamp(evaluation_index[0]), pd.Timestamp(evaluation_index[-1])
-    schedules = scheduled_trade_dates(evaluation_index, start_actual, end_actual, config["rebalance_frequency"])
+    schedules = scheduled_trade_dates(evaluation_index, requested_start, end_actual, config["rebalance_frequency"])
     schedule_map = {actual: planned for planned, actual in schedules}
     contribution_dates = {
         actual
         for _, actual in scheduled_trade_dates(
             evaluation_index,
-            start_actual,
+            requested_start,
             end_actual,
             {"매월": "월별", "매분기": "분기", "매년": "연별"}[config["contribution_frequency"]],
         )[1:]
     } if config["contribution_amount"] > 0 else set()
 
-    tickers = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
+    tickers = list(dict.fromkeys(
+        config["attack_tickers"] + config["defense_tickers"]
+        + ([cash_replacement] if cash_replacement else [])
+    ))
     shares = pd.Series(0.0, index=tickers)
     cash = float(config["initial_investment"])
     total_invested = cash
@@ -631,9 +751,9 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                         value = float(momentum_detail(prices[ticker], signal_date, weight_config)["계산값"])
                     weight_values[ticker] = value
                     attack_rows[ticker]["비중 기준값"] = value
-                    attack_rows[ticker]["비중 통과"] = value >= 0.0
+                    attack_rows[ticker]["비중 통과"] = value > 0.0
                 valid_count = len(weight_values)
-                positive_count = sum(value >= 0.0 for value in weight_values.values())
+                positive_count = sum(value > 0.0 for value in weight_values.values())
                 attack_base = positive_count / valid_count if valid_count else 0.0
                 weight_summary = f"{weight_basis} · 플러스 {positive_count}/{valid_count}개"
             else:
@@ -697,10 +817,19 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
             remainder = 1.0 - sum(new_weights.values())
             if remainder > 1e-10:
                 new_weights[CASH] = new_weights.get(CASH, 0.0) + remainder
+            if cash_replacement:
+                if cash_replacement not in prices.columns:
+                    raise ValueError(f"현금 대체 자산 {cash_replacement}의 가격 데이터가 없습니다.")
+                replacement_amount = new_weights.pop(CASH, 0.0)
+                if replacement_amount:
+                    new_weights[cash_replacement] = new_weights.get(cash_replacement, 0.0) + replacement_amount
             if not math.isclose(sum(new_weights.values()), 1.0, abs_tol=1e-8):
                 raise ValueError("최종 목표 비중 합계가 100%가 아닙니다.")
 
-            current_values = shares * prices.loc[date, tickers]
+            execution_row = execution_prices.loc[date, tickers]
+            if execution_row.isna().any() or (execution_row <= 0).any():
+                raise ValueError(f"{date.date()}의 수정 시가 데이터가 부족합니다.")
+            current_values = shares * execution_row
             current_weights = {ticker: float(value / before_value) for ticker, value in current_values.items()}
             current_weights[CASH] = cash / before_value if before_value else 0.0
             all_assets = set(current_weights) | set(new_weights)
@@ -712,7 +841,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
             fee = gross_trade * fee_rate
             investable = max(0.0, before_value - fee)
             for ticker in tickers:
-                shares[ticker] = investable * new_weights.get(ticker, 0.0) / float(prices.at[date, ticker])
+                shares[ticker] = investable * new_weights.get(ticker, 0.0) / float(execution_prices.at[date, ticker])
             cash = investable * new_weights.get(CASH, 0.0)
             target_weights = new_weights
             previous_attack = {ticker for ticker in attack_weights if ticker != CASH}
@@ -746,12 +875,15 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                     "시장 신호 수": market_summary.get("signal_count", 0),
                     "시장 전환 비중": market_summary.get("moved", 0.0),
                     "시장 신호 결합": market_summary.get("combine", "-"),
+                    "현금 대체 자산": cash_replacement or CASH,
                     "시장 위험 회피 사유": (
                         "B 우선 발동으로 A 미평가" if market_summary.get("triggered")
                         else ("B 미발동 후 A 평가" if market_summary.get("enabled") else "-")
                     ),
                     "턴오버": 0.0 if date == start_actual else turnover,
                     "거래비용": fee,
+                    "수정 시가": ", ".join(f"{ticker} {float(execution_prices.at[date, ticker]):.6g}" for ticker in tickers if new_weights.get(ticker, 0.0) > 0),
+                    "수정 종가": ", ".join(f"{ticker} {float(prices.at[date, ticker]):.6g}" for ticker in tickers if new_weights.get(ticker, 0.0) > 0),
                     "평가금액": after_value,
                 }
             )
@@ -763,7 +895,7 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
                     continue
                 amount = contribution * weight
                 fee = amount * fee_rate
-                shares[ticker] += max(0.0, amount - fee) / float(prices.at[date, ticker])
+                shares[ticker] += max(0.0, amount - fee) / float(execution_prices.at[date, ticker])
                 cash -= amount
             before_value = float((shares * prices.loc[date, tickers]).sum() + cash)
 
@@ -781,7 +913,9 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
     invested_series = pd.Series(invested, index=evaluation_index, name="누적 투입금")
     flow_series = pd.Series(flows, index=evaluation_index, name="외부 현금흐름")
     nav = (1.0 + pd.Series(nav_returns, index=evaluation_index).fillna(0.0)).cumprod()
-    nav.iloc[0] = 1.0
+    # The first observation is the initial capital after execution at the
+    # applied day's open, marked at that day's close. Do not overwrite it with
+    # 1.0 or the first open-to-close return disappears from NAV/month one.
     drawdown = nav / nav.cummax() - 1.0
     years = max((evaluation_index[-1] - evaluation_index[0]).days / 365.25, 1 / 365.25)
     return {

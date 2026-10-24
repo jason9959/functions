@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import html
-from io import StringIO
+import os
+from io import BytesIO, StringIO
+from pathlib import Path
 import time
 from typing import Any
 
@@ -14,7 +17,7 @@ import streamlit as st
 import yfinance as yf
 
 from .catalog import display_name, normalize_ticker, suggestions
-from .engine import MomentumConfig, run_backtest
+from .engine import MARKET_SIGNAL_REQUIRED_BY_PRESETS, MARKET_SIGNAL_SUPPORT, MomentumConfig, normalize_market_signals, resolve_recent_period, run_backtest, validate_preset_market_signals
 from .results import download_summary_csv, render as render_results
 
 
@@ -42,6 +45,58 @@ MARKET_SIGNAL_LABELS = [
     "삼의 법칙 (Sahm's Rule)",
     "삼의 법칙과 SPY 모멘텀",
 ]
+PERIOD_MODES = ["직접 날짜 입력", "최근 N년"]
+RECENT_YEAR_OPTIONS = (1, 3, 5, 10)
+
+
+# Preset metadata is centralized so the UI never scatters strategy values.
+RESEARCH_PRESETS = {
+    "1. 분산투자 방어형": {
+        "attack_tickers": ["EDV", "GLD", "PDBC", "QQQ", "SOXX", "XLE", "XLK", "XLV"],
+        "defense_tickers": ["BIL", "IEF", "HYG"],
+        "attack_mode": "상대 & 절대 모멘텀 + 방어 스위치",
+        "attack_select_count": 4,
+        "attack_relative": {"kind": "모멘텀 스코어", "score_type": "1-3-6-12개월 단순"},
+        "attack_absolute": {"kind": "모멘텀 스코어", "score_type": "1-3-6-12개월 단순"},
+        "defense_enabled": True,
+        "defense_mode": "상대 모멘텀",
+        "defense_select_count": 1,
+        "defense_relative": {"kind": "수익률", "months": 1},
+        "include_cash": False,
+        "weight_mode": "마이너스 절대 모멘텀 수",
+        "negative_threshold": 5,
+        "negative_same_momentum": True,
+        "risk_enabled": True,
+        "canary_tickers": ["SPY", "TIP"],
+        "risk_apply_mode": "방어형",
+        "risk_direction": "마이너스(-)",
+        "risk_momentum_type": "절대 모멘텀",
+        "risk_same_momentum": False,
+        "risk_custom_momentum": {"kind": "이동평균", "months": 11},
+        "market_risk_enabled": True,
+        "market_risk_signals": ["S&P500 배당수익률"],
+        "dividend_threshold": 1.32,
+    },
+    "2. 집중투자 공격형": {
+        "attack_tickers": ["QQQ", "GLD", "PDBC", "EDV"],
+        "defense_tickers": [],
+        "attack_mode": "상대 모멘텀",
+        "attack_select_count": 1,
+        "attack_relative": {"kind": "수익률", "months": 1},
+        "defense_enabled": False,
+        "defense_mode": "전체 동일 비중",
+        "defense_select_count": 1,
+        "include_cash": False,
+        "weight_mode": "고정 범위",
+        "fixed_defense_weight": 0.0,
+        "dynamic_fixed_defense": False,
+        "risk_enabled": False,
+        "canary_tickers": [],
+        "market_risk_enabled": False,
+        "market_risk_signals": [],
+    },
+}
+validate_preset_market_signals(RESEARCH_PRESETS, required_by_presets=MARKET_SIGNAL_REQUIRED_BY_PRESETS)
 
 
 def _default_form() -> dict[str, Any]:
@@ -49,6 +104,8 @@ def _default_form() -> dict[str, Any]:
     return {
         "dynamic_start": today - dt.timedelta(days=365 * 10),
         "dynamic_end": today,
+        "dynamic_period_mode": "직접 날짜 입력",
+        "dynamic_recent_years": 10,
         "dynamic_initial": 10_000.0,
         "dynamic_investment_type": "거치식",
         "dynamic_rebalance": "월별",
@@ -62,6 +119,7 @@ def _default_form() -> dict[str, Any]:
         "dynamic_defense_mode": "전체 동일 비중",
         "dynamic_defense_select_count": 1,
         "dynamic_include_cash": True,
+        "dynamic_cash_replacement": False,
         "dynamic_same_momentum": True,
         "dynamic_weight_mode": "고정 범위",
         "dynamic_fixed_defense": False,
@@ -111,6 +169,67 @@ def _reset_form() -> None:
     st.session_state["dynamic_result_config"] = None
     st.session_state.pop("_dynamic_market_seen", None)
     st.session_state.pop("dynamic_saved_widget_values", None)
+
+
+def _apply_research_preset(name: str) -> None:
+    """Atomically apply a preset without touching the period controls."""
+    preset = RESEARCH_PRESETS[name]
+    period_keys = {"dynamic_period_mode", "dynamic_recent_years", "dynamic_start", "dynamic_end"}
+    preserved = {key: st.session_state[key] for key in period_keys if key in st.session_state}
+    for key in list(st.session_state):
+        if key.startswith("dynamic_") and key not in period_keys:
+            st.session_state.pop(key, None)
+    values = _default_form()
+    values.update({
+        "dynamic_attack_tickers": list(preset["attack_tickers"]),
+        "dynamic_defense_tickers": list(preset["defense_tickers"]),
+        "dynamic_canary_tickers": list(preset.get("canary_tickers", [])),
+        "dynamic_attack_mode": preset["attack_mode"],
+        "dynamic_attack_select_count": preset["attack_select_count"],
+        "dynamic_defense_enabled": preset["defense_enabled"],
+        "dynamic_defense_mode": preset["defense_mode"],
+        "dynamic_defense_select_count": preset.get("defense_select_count", 1),
+        "dynamic_include_cash": preset.get("include_cash", False),
+        "dynamic_weight_mode": preset["weight_mode"],
+        "dynamic_fixed_defense": preset["dynamic_fixed_defense"],
+        "dynamic_fixed_defense_weight": preset["fixed_defense_weight"] * 100.0,
+        "dynamic_negative_threshold": preset.get("negative_threshold", 1),
+        "dynamic_negative_same_momentum": preset.get("negative_same_momentum", True),
+        "dynamic_risk_enabled": preset.get("risk_enabled", False),
+        "dynamic_risk_apply_mode": preset.get("risk_apply_mode", "중립형"),
+        "dynamic_risk_direction": preset.get("risk_direction", "마이너스(-)"),
+        "dynamic_risk_momentum_type": preset.get("risk_momentum_type", "절대 모멘텀"),
+        "dynamic_risk_same_momentum": preset.get("risk_same_momentum", True),
+        "dynamic_market_risk_enabled": preset.get("market_risk_enabled", False),
+        "dynamic_market_risk_combine": "OR",
+        "dynamic_market_risk_signals": list(preset.get("market_risk_signals", [])),
+        "dynamic_market_dividend_threshold": preset.get("dividend_threshold", 1.32),
+        "dynamic_cash_replacement": False,
+        "dynamic_show_results": False,
+        "dynamic_result": None,
+        "dynamic_result_config": None,
+    })
+    momentum_specs = {
+        "attack_relative": preset.get("attack_relative"),
+        "attack_absolute": preset.get("attack_absolute"),
+        "defense_relative": preset.get("defense_relative"),
+        "defense_absolute": preset.get("defense_absolute"),
+        "risk_custom": preset.get("risk_custom_momentum"),
+    }
+    for prefix, spec in momentum_specs.items():
+        if not spec:
+            continue
+        values[f"dynamic_{prefix}_kind"] = spec["kind"]
+        if spec["kind"] == "모멘텀 스코어":
+            values[f"dynamic_{prefix}_score_type"] = spec["score_type"]
+        else:
+            values[f"dynamic_{prefix}_months"] = spec["months"]
+    # Apply only supported market signals and reset every checkbox key first.
+    for index, label in enumerate(MARKET_SIGNAL_LABELS):
+        values[f"dynamic_market_signal_{index}"] = label in preset.get("market_risk_signals", []) and MARKET_SIGNAL_SUPPORT.get(label, False)
+    values.update(preserved)
+    st.session_state.update(values)
+    st.session_state["dynamic_preset_notice"] = name
 
 
 def _render_error_dialog() -> None:
@@ -265,7 +384,7 @@ def _uses_absolute(mode: str) -> bool:
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
-def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> pd.DataFrame:
+def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     raw = yf.download(
         list(symbols), start=pd.Timestamp(start_iso), end=pd.Timestamp(end_iso) + pd.Timedelta(days=1),
         auto_adjust=False, progress=False, threads=False, group_by="column",
@@ -273,26 +392,37 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
     if raw is None or raw.empty:
         raise ValueError("Yahoo Finance에서 가격 데이터를 가져오지 못했습니다.")
     if isinstance(raw.columns, pd.MultiIndex):
-        if "Adj Close" not in raw.columns.get_level_values(0):
+        if "Adj Close" not in raw.columns.get_level_values(0) or "Open" not in raw.columns.get_level_values(0):
             raise ValueError(
                 "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
                 "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
             )
         prices = raw["Adj Close"].copy()
+        opens = raw["Open"].copy()
     else:
-        if "Adj Close" not in raw.columns:
+        if "Adj Close" not in raw.columns or "Open" not in raw.columns:
             raise ValueError(
                 "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
                 "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
             )
         prices = raw[["Adj Close"]].copy()
         prices.columns = [symbols[0]]
+        opens = raw[["Open"]].copy()
+        opens.columns = [symbols[0]]
     if isinstance(prices, pd.Series):
         prices = prices.to_frame(name=symbols[0])
+    if isinstance(opens, pd.Series):
+        opens = opens.to_frame(name=symbols[0])
     prices.index = pd.to_datetime(prices.index)
     if getattr(prices.index, "tz", None) is not None:
         prices.index = prices.index.tz_localize(None)
-    return prices.apply(pd.to_numeric, errors="coerce").sort_index()
+    opens.index = pd.to_datetime(opens.index)
+    if getattr(opens.index, "tz", None) is not None:
+        opens.index = opens.index.tz_localize(None)
+    return (
+        prices.apply(pd.to_numeric, errors="coerce").sort_index(),
+        opens.apply(pd.to_numeric, errors="coerce").sort_index(),
+    )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -331,7 +461,74 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
     raise ValueError(f"FRED {series_id} 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.") from last_error
 
 
-def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dict[str, pd.Series]]:
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
+    """Load Shiller's monthly S&P data and derive dividend yield.
+
+    The source is the Yale-hosted original workbook, not a FRED alias. A
+    local workbook cache or ``SHILLER_DIVIDEND_CSV`` override can be used when
+    the remote workbook is temporarily unavailable.
+    """
+    source_url = "https://www.econ.yale.edu/~shiller/data/ie_data.xls"
+    cache_dir = Path(".cache")
+    cache_path = cache_dir / "shiller_ie_data.xls"
+    csv_override = Path(os.environ["SHILLER_DIVIDEND_CSV"]) if os.environ.get("SHILLER_DIVIDEND_CSV") else None
+    payload: bytes | None = None
+    source = source_url
+    if csv_override and csv_override.exists():
+        frame = pd.read_csv(csv_override)
+        source = str(csv_override)
+    else:
+        try:
+            response = requests.get(source_url, timeout=(8, 30), headers={"User-Agent": "stock-simulator/1.0"})
+            response.raise_for_status()
+            payload = response.content
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(payload)
+        except (requests.RequestException, OSError) as error:
+            if not cache_path.exists():
+                raise ValueError(
+                    "Yale Shiller 배당 데이터 다운로드에 실패했고 검증된 로컬 캐시도 없습니다. "
+                    "SHILLER_DIVIDEND_CSV 환경변수로 Date,Price,Dividend CSV를 지정할 수 있습니다."
+                ) from error
+            payload = cache_path.read_bytes()
+            source = str(cache_path)
+        try:
+            frame = pd.read_excel(BytesIO(payload), sheet_name=0, header=None)
+        except Exception as error:
+            raise ValueError(
+                "Yale Shiller 원본 파일을 읽지 못했습니다. CSV override(Date,Price,Dividend)를 사용해주세요."
+            ) from error
+    aliases = {"P": "Price", "D": "Dividend", "price": "Price", "dividend": "Dividend", "date": "Date"}
+    frame = frame.rename(columns={column: aliases.get(str(column).strip(), str(column).strip()) for column in frame.columns})
+    if not {"Date", "Price", "Dividend"}.issubset(frame.columns):
+        header = next((i for i in range(min(30, len(frame))) if {"Date", "Price", "Dividend"}.issubset(set(frame.iloc[i].astype(str)))), None)
+        if header is None:
+            raise ValueError("Yale/CSV 배당 데이터에는 Date, Price, Dividend 열이 필요합니다.")
+        columns = [aliases.get(str(value).strip(), str(value).strip()) for value in frame.iloc[header].tolist()]
+        frame = frame.iloc[header + 1:].copy()
+        frame.columns = columns
+    frame = frame.rename(columns={"Date": "Date", "Price": "Price", "Dividend": "Dividend"})
+    dates = pd.to_numeric(frame["Date"], errors="coerce")
+    # Shiller dates are decimal years (e.g. 1950.01). CSV users may supply ISO dates.
+    parsed = pd.to_datetime(frame["Date"], errors="coerce")
+    decimal_mask = parsed.isna() & dates.notna()
+    parsed.loc[decimal_mask] = dates.loc[decimal_mask].map(
+        lambda value: pd.Timestamp(year=int(value), month=max(1, min(12, int(round((value - int(value)) * 100)))), day=1)
+    )
+    price = pd.to_numeric(frame["Price"], errors="coerce")
+    dividend = pd.to_numeric(frame["Dividend"], errors="coerce")
+    result = (dividend / price * 100).where(price > 0).dropna()
+    result.index = pd.DatetimeIndex(parsed.loc[result.index]).to_period("M").to_timestamp("M")
+    result = result.sort_index().loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
+    result.name = "SP500_DIV_YIELD"
+    result.attrs.update({"source": source, "source_url": source_url, "retrieved_at": dt.datetime.now(dt.timezone.utc).isoformat(), "sha256": hashlib.sha256(payload or csv_override.read_bytes()).hexdigest()})
+    if result.empty:
+        raise ValueError("Yale Shiller 배당 데이터에 요청 기간의 유효한 값이 없습니다.")
+    return result
+
+
+def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dict[str, pd.Series], pd.DataFrame]:
     market = config["market"]
     requested = list(dict.fromkeys(config["attack_tickers"] + config["defense_tickers"]))
     risk = config.get("risk_avoidance") or {}
@@ -347,7 +544,7 @@ def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dic
     market_symbols = ["SPY"] if any("SPY" in label for label in market_signals) else []
     symbols = tuple(dict.fromkeys(requested + extra + canaries + market_symbols))
     lookback = pd.Timestamp(config["start_date"]) - pd.DateOffset(months=13, days=10)
-    raw = _download_prices(symbols, lookback.date().isoformat(), config["end_date"].isoformat())
+    raw, execution_prices = _download_prices(symbols, lookback.date().isoformat(), config["end_date"].isoformat())
     missing = [ticker for ticker in symbols if ticker not in raw.columns or raw[ticker].dropna().empty]
     if missing:
         missing_canaries = [ticker for ticker in missing if ticker in canaries]
@@ -359,27 +556,33 @@ def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dic
             )
         raise ValueError("가격 데이터가 없는 종목: " + ", ".join(missing))
     prices = raw.ffill()
+    execution_prices = execution_prices.ffill()
     if market == "국내 ETF":
         prices["BIL_KRW"] = prices["BIL"] * prices["KRW=X"]
+        execution_prices["BIL_KRW"] = execution_prices["BIL"] * execution_prices["KRW=X"]
         market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
-        return prices, benchmark_source, "BIL_KRW", market_data
+        return prices, benchmark_source, "BIL_KRW", market_data, execution_prices
     if config["benchmark"] == "KOSPI":
         prices["KOSPI_USD"] = prices[benchmark_source] / prices["KRW=X"]
+        execution_prices["KOSPI_USD"] = execution_prices[benchmark_source] / execution_prices["KRW=X"]
         market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
-        return prices, "KOSPI_USD", "BIL", market_data
+        return prices, "KOSPI_USD", "BIL", market_data, execution_prices
     market_data = _load_market_data(market_signals, lookback.date().isoformat(), config["end_date"].isoformat())
-    return prices, benchmark_source, "BIL", market_data
+    return prices, benchmark_source, "BIL", market_data, execution_prices
 
 
 def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[str, pd.Series]:
     if not signals:
         return {}
-    needed = {"DGS10", "DGS2"} if any("금리차" in label for label in signals) else set()
+    needed = set()
+    if any("10년-2년" in label for label in signals):
+        needed.update({"DGS10", "DGS2"})
     if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
         needed.add("UNRATE")
+    data = {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed) if series_id != "SP500_DIV_YIELD"}
     if "S&P500 배당수익률" in signals:
-        needed.add("SP500_DIV_YIELD")
-    return {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed)}
+        data["SP500_DIV_YIELD"] = _download_shiller_dividend_yield(start_iso, end_iso)
+    return data
 
 
 def _normalized(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
@@ -390,10 +593,11 @@ def _normalized(series: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
 
 
 def _run(config: dict[str, Any]) -> dict[str, Any]:
-    prices, benchmark_ticker, bil_ticker, market_data = _prepare_prices(config)
+    prices, benchmark_ticker, bil_ticker, market_data, execution_prices = _prepare_prices(config)
     config["bil_ticker"] = bil_ticker
     engine_config = dict(config)
     engine_config["_market_data"] = market_data
+    engine_config["execution_prices"] = execution_prices
     result = run_backtest(prices, engine_config)
     index = result["nav"].index
     benchmark_nav = _normalized(prices[benchmark_ticker].rename("벤치마크"), index)
@@ -448,15 +652,39 @@ def _render_conditions() -> None:
     if st.button("↺ 조건 초기화", key="reset_dynamic_conditions"):
         _reset_form()
         st.rerun()
+    st.caption("연구 포트폴리오 프리셋")
+    preset_cols = st.columns(2)
+    for column, name in zip(preset_cols, RESEARCH_PRESETS):
+        with column:
+            if st.button(name, key=f"apply_{name}", use_container_width=True):
+                _apply_research_preset(name)
+                st.rerun()
+    if st.session_state.pop("dynamic_preset_notice", None):
+        st.toast("프리셋을 적용했습니다. 조건을 확인하고 필요하면 수정하세요.")
 
     tabs = st.tabs([
         "기본설정", "종목선택", "투자자산 선택", "방어자산 선택",
         "포트폴리오 비중", "위험 회피 옵션",
     ])
     with tabs[0]:
+        period_mode = st.radio(
+            "백테스트 기간 방식", PERIOD_MODES, horizontal=True,
+            key="dynamic_period_mode",
+            help="두 방식의 날짜 값은 서로 동기화하지 않고 독립적으로 보존합니다.",
+        )
         date_col, end_col, initial_col = st.columns(3)
-        start_date = date_col.date_input("시작 날짜", min_value=EARLIEST_DATE, max_value=dt.date.today(), key="dynamic_start")
-        end_date = end_col.date_input("종료 날짜", min_value=EARLIEST_DATE, max_value=dt.date.today(), key="dynamic_end")
+        start_date = date_col.date_input(
+            "시작 날짜", min_value=EARLIEST_DATE, max_value=dt.date.today(),
+            key="dynamic_start", disabled=period_mode != "직접 날짜 입력",
+        )
+        end_date = end_col.date_input(
+            "종료 날짜", min_value=EARLIEST_DATE, max_value=dt.date.today(),
+            key="dynamic_end", disabled=period_mode != "직접 날짜 입력",
+        )
+        recent_years = st.selectbox(
+            "최근 기간", RECENT_YEAR_OPTIONS, format_func=lambda value: f"최근 {value}년",
+            key="dynamic_recent_years", disabled=period_mode != "최근 N년",
+        )
         initial = initial_col.number_input("초기 투자금", min_value=1.0, step=1_000.0, key="dynamic_initial")
         type_col, rebalance_col, benchmark_col = st.columns(3)
         investment_type = type_col.selectbox("투자 방식", ["거치식", "적립식"], key="dynamic_investment_type")
@@ -513,6 +741,11 @@ def _render_conditions() -> None:
         defense_enabled = st.checkbox("방어자산 선택 사용", key="dynamic_defense_enabled")
         defense_mode = st.radio("방어자산 선택 방식", DEFENSE_MODES, key="dynamic_defense_mode", disabled=not defense_enabled)
         include_cash = st.checkbox("현금을 방어 후보에 포함", key="dynamic_include_cash", disabled=not defense_enabled)
+        cash_replacement = st.checkbox(
+            "현금 대신 BIL로 보유",
+            key="dynamic_cash_replacement",
+            help="절대모멘텀 탈락분·방어 전환분을 현금 잔고가 아닌 BIL 가격 흐름으로 반영합니다. 절대모멘텀 비교 기준(BIL)과는 별개의 기능입니다.",
+        )
         defense_select_count = 1
         if defense_mode in {"상대 모멘텀", "상대 & 절대 모멘텀", "상대 & 절대 모멘텀 + 현금 스위치"}:
             count = len(defense_tickers) + (1 if include_cash else 0)
@@ -648,7 +881,16 @@ def _render_conditions() -> None:
             signal_cols = st.columns(2)
             for index, label in enumerate(MARKET_SIGNAL_LABELS):
                 with signal_cols[index % 2]:
-                    if st.checkbox(label, key=f"dynamic_market_signal_{index}"):
+                    supported = MARKET_SIGNAL_SUPPORT.get(label, False)
+                    checked = st.checkbox(
+                        label,
+                        key=f"dynamic_market_signal_{index}",
+                        disabled=not supported,
+                        help=("검증 후 제공" if not supported else "Yale Shiller 월별 데이터가 정상 확보될 때 사용합니다."),
+                    )
+                    if not supported:
+                        st.caption("검증 후 제공")
+                    elif checked:
                         selected_signals.append(label)
             market_risk_signals = selected_signals
             spread_lag = st.number_input(
@@ -687,6 +929,8 @@ def _render_conditions() -> None:
         st.rerun()
     if not run:
         return
+    if period_mode == "최근 N년":
+        start_date, end_date = resolve_recent_period(dt.date.today(), int(recent_years))
     if start_date >= end_date:
         st.session_state["dynamic_error"] = "시작 날짜는 종료 날짜보다 앞서야 합니다."
         st.rerun()
@@ -709,6 +953,9 @@ def _render_conditions() -> None:
         "defense_select_count": int(defense_select_count), "defense_relative": defense_relative,
         "defense_absolute": defense_absolute, "defense_use_bil": bool(defense_use_bil),
         "include_cash": bool(include_cash), "weight_mode": weight_mode,
+        "cash_replacement_ticker": (
+            ("BIL_KRW" if market == "국내 ETF" else "BIL") if cash_replacement else None
+        ),
         "fixed_defense_weight": float((fixed_defense if use_fixed_defense else 0.0) / 100.0),
         "negative_threshold": int(negative_threshold),
         "negative_same_momentum": bool(negative_same_momentum),
