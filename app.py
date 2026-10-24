@@ -2234,7 +2234,7 @@ def render_real_estate_conditions() -> None:
         st.number_input("주식 초기 투자금 (자동 계산)", value=float(stock_initial_preview), disabled=True, step=10_000.0)
     rent_cycle = st.selectbox("월세 인상 주기", ["사용 안 함", "1년", "2년", "3년", "4년"], key="real_estate_rent_growth_cycle")
     rent_growth = st.number_input("월세 상승률 (연 %)", min_value=0.0, step=0.1, disabled=rent_cycle == "사용 안 함", key="real_estate_rent_growth")
-    stock = st.selectbox("주식 종목", ["VOO", "QQQ"], key="real_estate_stock")
+    stock = st.selectbox("주식 종목", ["VOO", "QQQ", "QLD"], key="real_estate_stock")
     path_method = st.selectbox(
         "주가 경로 생성 방식",
         ["기존 주가 이용", "Bootstrap", "정규분포"],
