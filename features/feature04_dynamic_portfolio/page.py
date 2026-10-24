@@ -508,24 +508,35 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
                 last_error = error
                 if attempt == 0:
                     time.sleep(0.8)
-    # A public mirror is available for the 10y-3m spread when FRED egress is
-    # blocked in a hosted runtime.  It uses the same DATE/value convention.
+    # Public mirrors for hosted runtimes where FRED egress is blocked.  The
+    # DBnomics endpoint mirrors FRED observations and returns stable JSON.
     mirror_urls = {
-        "T10Y3M": "https://eco3min.fr/dataset/yield-curve-spread-10y-3m.csv",
+        "T10Y3M": (
+            "https://api.db.nomics.world/v22/series/FRED/T10Y3M?observations=1",
+            "https://eco3min.fr/dataset/yield-curve-spread-10y-3m.csv",
+        ),
+        "T10Y2Y": ("https://api.db.nomics.world/v22/series/FRED/T10Y2Y?observations=1",),
     }
-    mirror_url = mirror_urls.get(series_id)
-    if mirror_url:
+    for mirror_url in mirror_urls.get(series_id, ()):
         try:
             response = requests.get(mirror_url, timeout=(8, 20), headers={"User-Agent": "stock-simulator/1.0"})
             response.raise_for_status()
-            frame = pd.read_csv(StringIO(response.text), na_values=["."])
-            if frame.shape[1] >= 2:
+            if mirror_url.endswith(".csv"):
+                frame = pd.read_csv(StringIO(response.text), na_values=["."])
+                if frame.shape[1] < 2:
+                    raise ValueError("미러 CSV에 관측 열이 없습니다.")
                 values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
                 index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
-                mirrored = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
-                if not mirrored.empty:
-                    return mirrored.loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
-        except (requests.RequestException, ValueError, OSError) as error:
+            else:
+                payload = response.json()
+                series_data = payload["series"]["docs"][0]
+                index = pd.to_datetime(series_data["period"], errors="coerce")
+                values = pd.to_numeric(pd.Series(series_data["value"]), errors="coerce")
+            mirrored = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
+            mirrored = mirrored.loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
+            if not mirrored.empty:
+                return mirrored
+        except (requests.RequestException, ValueError, OSError, KeyError, TypeError) as error:
             last_error = error
     raise ValueError(f"FRED {series_id} 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.") from last_error
 
