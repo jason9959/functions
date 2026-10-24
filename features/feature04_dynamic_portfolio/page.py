@@ -508,6 +508,25 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
                 last_error = error
                 if attempt == 0:
                     time.sleep(0.8)
+    # A public mirror is available for the 10y-3m spread when FRED egress is
+    # blocked in a hosted runtime.  It uses the same DATE/value convention.
+    mirror_urls = {
+        "T10Y3M": "https://eco3min.fr/dataset/yield-curve-spread-10y-3m.csv",
+    }
+    mirror_url = mirror_urls.get(series_id)
+    if mirror_url:
+        try:
+            response = requests.get(mirror_url, timeout=(8, 20), headers={"User-Agent": "stock-simulator/1.0"})
+            response.raise_for_status()
+            frame = pd.read_csv(StringIO(response.text), na_values=["."])
+            if frame.shape[1] >= 2:
+                values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
+                index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
+                mirrored = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
+                if not mirrored.empty:
+                    return mirrored.loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
+        except (requests.RequestException, ValueError, OSError) as error:
+            last_error = error
     raise ValueError(f"FRED {series_id} 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.") from last_error
 
 
@@ -644,9 +663,12 @@ def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[s
         return {}
     needed = set()
     if any("10년-2년" in label for label in signals):
-        needed.update({"T10Y2Y", "DGS10", "DGS2"})
+        # Prefer FRED's published spread series.  Do not also request the
+        # component yields: they are only a fallback for old cached datasets,
+        # and an unnecessary DGS10 request can make an otherwise valid run fail.
+        needed.add("T10Y2Y")
     if any("10년-3개월" in label for label in signals):
-        needed.update({"T10Y3M", "T10Y3MM", "DGS10", "DGS3MO"})
+        needed.add("T10Y3M")
     if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
         needed.add("UNRATE")
     data = {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed) if series_id != "SP500_DIV_YIELD"}
