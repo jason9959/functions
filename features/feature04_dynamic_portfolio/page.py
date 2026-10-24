@@ -512,6 +512,7 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
     # DBnomics endpoint mirrors FRED observations and returns stable JSON.
     mirror_urls = {
         "T10Y3M": (
+            "https://autario.com/api/v1/public/datasets/6ee33d8e-45c0-4a5a-b1a4-96574058cb46/data",
             "https://api.db.nomics.world/v22/series/FRED/T10Y3M?observations=1",
             "https://eco3min.fr/dataset/yield-curve-spread-10y-3m.csv",
         ),
@@ -519,9 +520,16 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
     }
     for mirror_url in mirror_urls.get(series_id, ()):
         try:
-            response = requests.get(mirror_url, timeout=(8, 20), headers={"User-Agent": "stock-simulator/1.0"})
+            params = None
+            if mirror_url.startswith("https://autario.com/"):
+                params = {"limit": 20_000, "filter": f"date:gte:{start_iso}", "sort": "date:asc"}
+            response = requests.get(mirror_url, params=params, timeout=(8, 20), headers={"User-Agent": "stock-simulator/1.0"})
             response.raise_for_status()
-            if mirror_url.endswith(".csv"):
+            if mirror_url.startswith("https://autario.com/"):
+                rows = response.json().get("data", [])
+                index = pd.to_datetime([row["date"] for row in rows], errors="coerce")
+                values = pd.to_numeric(pd.Series([row["value"] for row in rows]), errors="coerce")
+            elif mirror_url.endswith(".csv"):
                 frame = pd.read_csv(StringIO(response.text), na_values=["."])
                 if frame.shape[1] < 2:
                     raise ValueError("미러 CSV에 관측 열이 없습니다.")
