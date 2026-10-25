@@ -479,6 +479,10 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Series:
     """Download a public FRED series without requiring an API key."""
+    # Yield-curve spreads are deliberately CSV-first.  Keep this guard so a
+    # future caller cannot accidentally restore the fragile FRED runtime path.
+    if series_id in {"T10Y2Y", "T10Y3M"}:
+        return load_treasury_spreads({series_id}, start_iso, end_iso)[series_id]
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv"
     # The dividend-yield series has had multiple public aliases. Try the
     # current FRED identifier first, then compatible legacy aliases.
@@ -523,11 +527,10 @@ def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
     # Yale occasionally blocks cloud-hosted egress.  These mirrors contain the
     # same Robert Shiller workbook and keep the preset usable on Streamlit Cloud.
     source_urls = (
-        "https://www.econ.yale.edu/~shiller/data/ie_data.xls",
         "https://raw.githubusercontent.com/jamesplease/stock-market-data/master/ie_data.xls",
         "https://raw.githubusercontent.com/jamesplease/stock-market-data/main/ie_data.xls",
         "https://posix4e.github.io/shiller_wrapper_data/ie_data.xls",
-        "https://shillerdata.com/ie_data.xls",
+        "https://www.econ.yale.edu/~shiller/data/ie_data.xls",
     )
     source_url = source_urls[0]
     cache_dir = Path(".cache")
@@ -563,33 +566,54 @@ def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
             payload = cache_path.read_bytes()
             source = str(cache_path)
         try:
-            frame = pd.read_excel(BytesIO(payload), sheet_name=0, header=None)
+            # The first sheet is a one-cell disclaimer.  Price and dividend
+            # observations live in the explicitly named Data sheet.
+            frame = pd.read_excel(BytesIO(payload), sheet_name="Data", header=None, engine="xlrd")
         except Exception as error:
             raise ValueError(
                 "Yale Shiller 원본 파일을 읽지 못했습니다. CSV override(Date,Price,Dividend)를 사용해주세요."
             ) from error
-    aliases = {"P": "Price", "D": "Dividend", "price": "Price", "dividend": "Dividend", "date": "Date"}
-    frame = frame.rename(columns={column: aliases.get(str(column).strip(), str(column).strip()) for column in frame.columns})
+    aliases = {
+        "P": "Price", "D": "Dividend", "p": "Price", "d": "Dividend",
+        "price": "Price", "dividend": "Dividend", "date": "Date", "Date": "Date",
+    }
+
+    def normalized_column(value: Any) -> str:
+        text = str(value).strip()
+        return aliases.get(text, aliases.get(text.lower(), text))
+
+    frame = frame.rename(columns={column: normalized_column(column) for column in frame.columns})
     if not {"Date", "Price", "Dividend"}.issubset(frame.columns):
-        header = next((i for i in range(min(30, len(frame))) if {"Date", "Price", "Dividend"}.issubset(set(frame.iloc[i].astype(str)))), None)
+        header = next(
+            (
+                i for i in range(min(30, len(frame)))
+                if {"Date", "Price", "Dividend"}.issubset(
+                    {normalized_column(value) for value in frame.iloc[i].tolist()}
+                )
+            ),
+            None,
+        )
         if header is None:
             raise ValueError("Yale/CSV 배당 데이터에는 Date, Price, Dividend 열이 필요합니다.")
-        columns = [aliases.get(str(value).strip(), str(value).strip()) for value in frame.iloc[header].tolist()]
+        columns = [normalized_column(value) for value in frame.iloc[header].tolist()]
         frame = frame.iloc[header + 1:].copy()
         frame.columns = columns
     frame = frame.rename(columns={"Date": "Date", "Price": "Price", "Dividend": "Dividend"})
     dates = pd.to_numeric(frame["Date"], errors="coerce")
-    # Shiller dates are decimal years (e.g. 1950.01). CSV users may supply ISO dates.
-    parsed = pd.to_datetime(frame["Date"], errors="coerce")
-    decimal_mask = parsed.isna() & dates.notna()
+    # Shiller dates are decimal years (e.g. 1950.01).  Parsing the numeric
+    # value directly as a datetime would incorrectly interpret it as Unix
+    # nanoseconds, so recognize the decimal-year range first.
+    parsed = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+    decimal_mask = dates.between(1800, 3000, inclusive="both")
     parsed.loc[decimal_mask] = dates.loc[decimal_mask].map(
         lambda value: pd.Timestamp(year=int(value), month=max(1, min(12, int(round((value - int(value)) * 100)))), day=1)
     )
+    parsed.loc[~decimal_mask] = pd.to_datetime(frame.loc[~decimal_mask, "Date"], errors="coerce")
     price = pd.to_numeric(frame["Price"], errors="coerce")
     dividend = pd.to_numeric(frame["Dividend"], errors="coerce")
     result = (dividend / price * 100).where(price > 0).dropna()
     result.index = pd.DatetimeIndex(parsed.loc[result.index]).to_period("M").to_timestamp("M")
-    result = result.sort_index().loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
+    result = result.groupby(level=0).last().sort_index().loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
     result.name = "SP500_DIV_YIELD"
     result.attrs.update({"source": source, "source_url": source_url, "retrieved_at": dt.datetime.now(dt.timezone.utc).isoformat(), "sha256": hashlib.sha256(payload or csv_override.read_bytes()).hexdigest()})
     if result.empty:
