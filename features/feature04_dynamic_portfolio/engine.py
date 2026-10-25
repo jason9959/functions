@@ -507,9 +507,11 @@ def _market_signal_details(
     unemployment_months = int(risk.get("unemployment_months", 12))
 
     def monthly(series: pd.Series) -> pd.Series:
-        # "M" works on the local pandas version and remains compatible with
-        # newer versions where month-end aliases may be renamed.
-        return series.dropna().resample("M").last().dropna()
+        clean = series.dropna().sort_index()
+        periods = clean.index.to_period("M")
+        result = clean.groupby(periods).last().dropna()
+        result.index = result.index.to_timestamp("M")
+        return result
 
     def unemployment_state() -> tuple[bool, float, float]:
         series = monthly(data["UNRATE"])

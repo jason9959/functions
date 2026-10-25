@@ -18,6 +18,7 @@ import yfinance as yf
 
 from .catalog import display_name, normalize_ticker, suggestions
 from .engine import MARKET_SIGNAL_REQUIRED_BY_PRESETS, MARKET_SIGNAL_SUPPORT, MomentumConfig, normalize_market_signals, resolve_recent_period, run_backtest, validate_preset_market_signals
+from .market_data import load_treasury_spreads
 from .results import download_summary_csv, render as render_results
 
 
@@ -508,44 +509,6 @@ def _download_fred_series(series_id: str, start_iso: str, end_iso: str) -> pd.Se
                 last_error = error
                 if attempt == 0:
                     time.sleep(0.8)
-    # Public mirrors for hosted runtimes where FRED egress is blocked.  The
-    # DBnomics endpoint mirrors FRED observations and returns stable JSON.
-    mirror_urls = {
-        "T10Y3M": (
-            "https://autario.com/api/v1/public/datasets/6ee33d8e-45c0-4a5a-b1a4-96574058cb46/data",
-            "https://api.db.nomics.world/v22/series/FRED/T10Y3M?observations=1",
-            "https://eco3min.fr/dataset/yield-curve-spread-10y-3m.csv",
-        ),
-        "T10Y2Y": ("https://api.db.nomics.world/v22/series/FRED/T10Y2Y?observations=1",),
-    }
-    for mirror_url in mirror_urls.get(series_id, ()):
-        try:
-            params = None
-            if mirror_url.startswith("https://autario.com/"):
-                params = {"limit": 20_000, "filter": f"date:gte:{start_iso}", "sort": "date:asc"}
-            response = requests.get(mirror_url, params=params, timeout=(8, 20), headers={"User-Agent": "stock-simulator/1.0"})
-            response.raise_for_status()
-            if mirror_url.startswith("https://autario.com/"):
-                rows = response.json().get("data", [])
-                index = pd.to_datetime([row["date"] for row in rows], errors="coerce")
-                values = pd.to_numeric(pd.Series([row["value"] for row in rows]), errors="coerce")
-            elif mirror_url.endswith(".csv"):
-                frame = pd.read_csv(StringIO(response.text), na_values=["."])
-                if frame.shape[1] < 2:
-                    raise ValueError("미러 CSV에 관측 열이 없습니다.")
-                values = pd.to_numeric(frame.iloc[:, 1], errors="coerce")
-                index = pd.to_datetime(frame.iloc[:, 0], errors="coerce")
-            else:
-                payload = response.json()
-                series_data = payload["series"]["docs"][0]
-                index = pd.to_datetime(series_data["period"], errors="coerce")
-                values = pd.to_numeric(pd.Series(series_data["value"]), errors="coerce")
-            mirrored = pd.Series(values.to_numpy(), index=index, name=series_id).dropna().sort_index()
-            mirrored = mirrored.loc[pd.Timestamp(start_iso):pd.Timestamp(end_iso)]
-            if not mirrored.empty:
-                return mirrored
-        except (requests.RequestException, ValueError, OSError, KeyError, TypeError) as error:
-            last_error = error
     raise ValueError(f"FRED {series_id} 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.") from last_error
 
 
@@ -649,7 +612,21 @@ def _prepare_prices(config: dict[str, Any]) -> tuple[pd.DataFrame, str, str, dic
     market_signals = set(market_risk.get("signals", [])) if market_risk.get("enabled") else set()
     market_symbols = ["SPY"] if any("SPY" in label for label in market_signals) else []
     symbols = tuple(dict.fromkeys(requested + extra + canaries + market_symbols))
-    lookback = pd.Timestamp(config["start_date"]) - pd.DateOffset(months=13, days=10)
+    # Momentum needs twelve months of history.  Delayed yield-curve signals
+    # can require more: for example, lag 7 + an 8-month event window needs at
+    # least 15 completed months before the first decision date.
+    lookback_months = 13
+    spread_settings = market_risk.get("spread_settings") or {}
+    for setting_key, signal_text, default_lag, default_active in (
+        ("10년-2년", "10년-2년", 0, 3),
+        ("10년-3개월", "10년-3개월", 7, 8),
+    ):
+        if any(signal_text in label for label in market_signals):
+            setting = spread_settings.get(setting_key, {})
+            lag = max(0, int(setting.get("lag", default_lag)))
+            active = max(1, int(setting.get("active", default_active)))
+            lookback_months = max(lookback_months, lag + active + 1)
+    lookback = pd.Timestamp(config["start_date"]) - pd.DateOffset(months=lookback_months, days=10)
     raw, execution_prices = _download_prices(symbols, lookback.date().isoformat(), config["end_date"].isoformat())
     missing = [ticker for ticker in symbols if ticker not in raw.columns or raw[ticker].dropna().empty]
     if missing:
@@ -690,7 +667,13 @@ def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[s
         needed.add("T10Y3M")
     if any(label in signals for label in {"실업률", "실업률 & SPY (GTT-UE)", "삼의 법칙 (Sahm's Rule)", "삼의 법칙과 SPY 모멘텀"}):
         needed.add("UNRATE")
-    data = {series_id: _download_fred_series(series_id, start_iso, end_iso) for series_id in sorted(needed) if series_id != "SP500_DIV_YIELD"}
+    spread_ids = needed & {"T10Y2Y", "T10Y3M"}
+    data = load_treasury_spreads(spread_ids, start_iso, end_iso)
+    # UNRATE remains a separate public series.  Yield spreads never enter the
+    # FRED runtime path: they are read from the bundled CSV and only missing
+    # months are refreshed into the ephemeral runtime cache.
+    for series_id in sorted(needed - spread_ids):
+        data[series_id] = _download_fred_series(series_id, start_iso, end_iso)
     if "S&P500 배당수익률" in signals:
         data["SP500_DIV_YIELD"] = _download_shiller_dividend_yield(start_iso, end_iso)
     return data

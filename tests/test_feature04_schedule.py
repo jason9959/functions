@@ -105,7 +105,7 @@ class ScheduledTradeDatesTests(unittest.TestCase):
 
     def test_ten_year_two_year_signal_uses_persistent_negative_window(self):
         index = pd.date_range("2020-01-01", "2021-12-31", freq="D")
-        monthly = pd.date_range("2020-01-31", "2021-12-31", freq="M")
+        monthly = pd.period_range("2020-01", "2021-12", freq="M").to_timestamp("M")
         prices = pd.DataFrame({"SPY": 100.0}, index=index)
         dgs10 = pd.Series(4.0, index=monthly)
         dgs2 = pd.Series(2.0, index=monthly)
@@ -128,7 +128,7 @@ class ScheduledTradeDatesTests(unittest.TestCase):
 
     def test_ten_year_three_month_delay_threshold_and_duration(self):
         index = pd.date_range("2020-01-01", "2023-12-31", freq="D")
-        monthly = pd.date_range("2020-01-31", "2023-12-31", freq="M")
+        monthly = pd.period_range("2020-01", "2023-12", freq="M").to_timestamp("M")
         prices = pd.DataFrame({"SPY": 100.0}, index=index)
         spread = pd.Series(0.0, index=monthly)
         # Event at 2022-01 is active at T=2022-08 through 2023-03
@@ -155,7 +155,7 @@ class ScheduledTradeDatesTests(unittest.TestCase):
 
     def test_market_or_and_combination_uses_each_signal(self):
         index = pd.date_range("2020-01-01", "2021-12-31", freq="D")
-        monthly = pd.date_range("2020-01-31", "2021-12-31", freq="M")
+        monthly = pd.period_range("2020-01", "2021-12", freq="M").to_timestamp("M")
         prices = pd.DataFrame({"SPY": 100.0}, index=index)
         dgs10 = pd.Series(4.0, index=monthly)
         dgs2 = pd.Series(2.0, index=monthly)
