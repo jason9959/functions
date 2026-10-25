@@ -576,8 +576,8 @@ def _market_signal_details(
             active = len(observations) == max(1, active_months) and any(spread_value < threshold for _, spread_value in observations)
             basis = f"{lag}개월 지연 {short_label} 금리차 {value:.2f}%p < {threshold:.2f}%p · {active_months}개월 이벤트 창 · 출처 {source}"
         elif label == "S&P500 배당수익률":
-            # Shiller's monthly observation is published after month-end; use
-            # it from the following month's decision onward.
+            # Use Multpl's monthly observation (including explicitly marked
+            # estimates) from the following month's decision onward.
             observed_date, value = _market_asof(
                 data["SP500_DIV_YIELD"], signal_date - pd.DateOffset(months=1)
             )
@@ -863,6 +863,11 @@ def run_backtest(prices: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]
             if execution_row.isna().any() or (execution_row <= 0).any():
                 raise ValueError(f"{date.date()}의 수정 시가 데이터가 부족합니다.")
             current_values = shares * execution_row
+            # Rebalance at the adjusted open.  Existing holdings must also be
+            # marked at that same open before target trades are calculated.
+            # Using the day's adjusted close here and then buying at the open
+            # would count the rebalance day's open-to-close move twice.
+            before_value = float(current_values.sum() + cash)
             current_weights = {ticker: float(value / before_value) for ticker, value in current_values.items()}
             current_weights[CASH] = cash / before_value if before_value else 0.0
             all_assets = set(current_weights) | set(new_weights)

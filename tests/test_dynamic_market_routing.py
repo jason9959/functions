@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -27,18 +27,23 @@ class DynamicMarketRoutingTests(unittest.TestCase):
         pd.testing.assert_series_equal(actual, expected)
 
     def test_shiller_uses_data_sheet_and_decimal_year_header(self):
-        rows = [[None] * 5 for _ in range(8)]
-        rows[7] = ["Date", "P", "D", "E", "CPI"]
+        rows = [[None] * 10 for _ in range(8)]
+        # The real workbook repeats Price and Dividend for inflation-adjusted
+        # values.  The loader must use the nominal P/D columns, not create
+        # duplicate labels and pass a DataFrame to pd.to_numeric.
+        rows[7] = ["Date", "P", "D", "E", "CPI", "Fraction", "Rate GS10", "Price", "Dividend", "Price"]
         rows.extend(
             [
-                [2020.01, 100.0, 2.0, None, None],
-                [2020.02, 110.0, 2.2, None, None],
+                [2020.01, 100.0, 2.0, None, None, None, None, 999.0, 99.0, 999.0],
+                [2020.02, 110.0, 2.2, None, None, None, None, 999.0, 99.0, 999.0],
             ]
         )
         raw = pd.DataFrame(rows)
         page._download_shiller_dividend_yield.clear()
 
-        with patch.object(page.requests, "get", return_value=_Response()), patch.object(
+        with patch.object(page, "Path", return_value=MagicMock()), patch.object(
+            page.requests, "get", return_value=_Response()
+        ), patch.object(
             page.pd, "read_excel", return_value=raw
         ) as read_excel:
             result = page._download_shiller_dividend_yield("2020-01-01", "2020-02-29")

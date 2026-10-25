@@ -18,7 +18,7 @@ import yfinance as yf
 
 from .catalog import display_name, normalize_ticker, suggestions
 from .engine import MARKET_SIGNAL_REQUIRED_BY_PRESETS, MARKET_SIGNAL_SUPPORT, MomentumConfig, normalize_market_signals, resolve_recent_period, run_backtest, validate_preset_market_signals
-from .market_data import load_treasury_spreads
+from .market_data import load_sp500_dividend_yield, load_treasury_spreads
 from .results import download_summary_csv, render as render_results
 
 
@@ -443,36 +443,53 @@ def _download_prices(symbols: tuple[str, ...], start_iso: str, end_iso: str) -> 
     if raw is None or raw.empty:
         raise ValueError("Yahoo Finance에서 가격 데이터를 가져오지 못했습니다.")
     if isinstance(raw.columns, pd.MultiIndex):
-        if "Adj Close" not in raw.columns.get_level_values(0) or "Open" not in raw.columns.get_level_values(0):
+        required_fields = {"Adj Close", "Close", "Open"}
+        if not required_fields.issubset(set(raw.columns.get_level_values(0))):
             raise ValueError(
-                "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
-                "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
+                "Yahoo Finance 응답에 시가·종가·수정종가가 모두 필요합니다. "
+                "분배금과 분할을 반영한 수정 시가를 만들 수 없어 백테스트를 중단했습니다."
             )
         prices = raw["Adj Close"].copy()
         opens = raw["Open"].copy()
+        closes = raw["Close"].copy()
     else:
-        if "Adj Close" not in raw.columns or "Open" not in raw.columns:
+        if not {"Adj Close", "Close", "Open"}.issubset(raw.columns):
             raise ValueError(
-                "Yahoo Finance 응답에 수정종가(Adj Close)가 없습니다. "
-                "분배금과 분할을 반영할 수 없어 백테스트를 중단했습니다."
+                "Yahoo Finance 응답에 시가·종가·수정종가가 모두 필요합니다. "
+                "분배금과 분할을 반영한 수정 시가를 만들 수 없어 백테스트를 중단했습니다."
             )
         prices = raw[["Adj Close"]].copy()
         prices.columns = [symbols[0]]
         opens = raw[["Open"]].copy()
         opens.columns = [symbols[0]]
+        closes = raw[["Close"]].copy()
+        closes.columns = [symbols[0]]
     if isinstance(prices, pd.Series):
         prices = prices.to_frame(name=symbols[0])
     if isinstance(opens, pd.Series):
         opens = opens.to_frame(name=symbols[0])
+    if isinstance(closes, pd.Series):
+        closes = closes.to_frame(name=symbols[0])
     prices.index = pd.to_datetime(prices.index)
     if getattr(prices.index, "tz", None) is not None:
         prices.index = prices.index.tz_localize(None)
     opens.index = pd.to_datetime(opens.index)
     if getattr(opens.index, "tz", None) is not None:
         opens.index = opens.index.tz_localize(None)
+    closes.index = pd.to_datetime(closes.index)
+    if getattr(closes.index, "tz", None) is not None:
+        closes.index = closes.index.tz_localize(None)
+    prices = prices.apply(pd.to_numeric, errors="coerce").sort_index()
+    opens = opens.apply(pd.to_numeric, errors="coerce").sort_index()
+    closes = closes.apply(pd.to_numeric, errors="coerce").sort_index()
+    # Yahoo's Adj Close is a synthetic total-return price, while Open and
+    # Close are on the unadjusted price basis.  Apply the same daily factor to
+    # Open so trade execution and portfolio valuation share one basis.
+    adjustment_factor = prices.divide(closes.where(closes > 0))
+    adjusted_opens = opens.multiply(adjustment_factor)
     return (
-        prices.apply(pd.to_numeric, errors="coerce").sort_index(),
-        opens.apply(pd.to_numeric, errors="coerce").sort_index(),
+        prices,
+        adjusted_opens,
     )
 
 
@@ -573,32 +590,48 @@ def _download_shiller_dividend_yield(start_iso: str, end_iso: str) -> pd.Series:
             raise ValueError(
                 "Yale Shiller 원본 파일을 읽지 못했습니다. CSV override(Date,Price,Dividend)를 사용해주세요."
             ) from error
-    aliases = {
-        "P": "Price", "D": "Dividend", "p": "Price", "d": "Dividend",
-        "price": "Price", "dividend": "Dividend", "date": "Date", "Date": "Date",
-    }
+    def select_columns(source_frame: pd.DataFrame) -> pd.DataFrame | None:
+        """Select one date, nominal-price and nominal-dividend column.
 
-    def normalized_column(value: Any) -> str:
-        text = str(value).strip()
-        return aliases.get(text, aliases.get(text.lower(), text))
+        The Shiller workbook contains additional real-price and real-dividend
+        columns whose displayed headers are also ``Price`` and ``Dividend``.
+        Renaming ``P``/``D`` first therefore creates duplicate column names and
+        makes ``frame["Price"]`` return a DataFrame instead of a Series.  Prefer
+        the workbook's original nominal ``P`` and ``D`` fields, and only use
+        ``Price``/``Dividend`` for the documented CSV override format.
+        """
 
-    frame = frame.rename(columns={column: normalized_column(column) for column in frame.columns})
-    if not {"Date", "Price", "Dividend"}.issubset(frame.columns):
-        header = next(
-            (
-                i for i in range(min(30, len(frame)))
-                if {"Date", "Price", "Dividend"}.issubset(
-                    {normalized_column(value) for value in frame.iloc[i].tolist()}
-                )
-            ),
-            None,
-        )
-        if header is None:
-            raise ValueError("Yale/CSV 배당 데이터에는 Date, Price, Dividend 열이 필요합니다.")
-        columns = [normalized_column(value) for value in frame.iloc[header].tolist()]
-        frame = frame.iloc[header + 1:].copy()
-        frame.columns = columns
-    frame = frame.rename(columns={"Date": "Date", "Price": "Price", "Dividend": "Dividend"})
+        labels = [str(value).strip() for value in source_frame.columns]
+        folded = [label.casefold() for label in labels]
+
+        def first_position(*candidates: str) -> int | None:
+            for candidate in candidates:
+                needle = candidate.casefold()
+                if needle in folded:
+                    return folded.index(needle)
+            return None
+
+        date_position = first_position("Date")
+        price_position = first_position("P", "Price")
+        dividend_position = first_position("D", "Dividend")
+        positions = (date_position, price_position, dividend_position)
+        if any(position is None for position in positions) or len(set(positions)) != 3:
+            return None
+        selected = source_frame.iloc[:, list(positions)].copy()
+        selected.columns = ["Date", "Price", "Dividend"]
+        return selected
+
+    selected = select_columns(frame)
+    if selected is None:
+        for header in range(min(30, len(frame))):
+            candidate = frame.iloc[header + 1:].copy()
+            candidate.columns = [str(value).strip() for value in frame.iloc[header].tolist()]
+            selected = select_columns(candidate)
+            if selected is not None:
+                break
+    if selected is None:
+        raise ValueError("Yale/CSV 배당 데이터에는 Date, Price, Dividend 열이 필요합니다.")
+    frame = selected
     dates = pd.to_numeric(frame["Date"], errors="coerce")
     # Shiller dates are decimal years (e.g. 1950.01).  Parsing the numeric
     # value directly as a datetime would incorrectly interpret it as Unix
@@ -699,7 +732,7 @@ def _load_market_data(signals: set[str], start_iso: str, end_iso: str) -> dict[s
     for series_id in sorted(needed - spread_ids):
         data[series_id] = _download_fred_series(series_id, start_iso, end_iso)
     if "S&P500 배당수익률" in signals:
-        data["SP500_DIV_YIELD"] = _download_shiller_dividend_yield(start_iso, end_iso)
+        data["SP500_DIV_YIELD"] = load_sp500_dividend_yield(start_iso, end_iso)
     return data
 
 
@@ -1004,7 +1037,7 @@ def _render_conditions() -> None:
                         label,
                         key=f"dynamic_market_signal_{index}",
                         disabled=not supported,
-                        help=("검증 후 제공" if not supported else "Yale Shiller 월별 데이터가 정상 확보될 때 사용합니다."),
+                        help=("검증 후 제공" if not supported else "Multpl 월별 데이터(추정치 포함)를 한 달 지연해 사용합니다."),
                     )
                     if not supported:
                         st.caption("검증 후 제공")
