@@ -1,7 +1,7 @@
 import pandas as pd
 
 from features.feature15_reb_statistics.api import parse_response
-from features.feature15_reb_statistics.analysis import analyze_statistics
+from features.feature15_reb_statistics.analysis import analyze_statistics, build_region_comparison
 
 
 def _payload(values=(100.0, 102.0)):
@@ -45,3 +45,15 @@ def test_rate_analysis_compounds_period_returns():
     result = analyze_statistics(frame, "rate")
     assert result["기간 변동률 (%)"].tolist() == [1.0, 2.0]
     assert round(result.loc[1, "누적 변화 (%)"], 6) == 3.02
+
+
+def test_region_comparison_uses_common_dates_and_ranks_growth():
+    first, _ = parse_response(_payload((100.0, 110.0)), "MM")
+    first["지역명"] = "지역A"
+    second, _ = parse_response(_payload((100.0, 105.0)), "MM")
+    second["지역명"] = "지역B"
+    frame = pd.concat([first, second], ignore_index=True)
+    normalized, ranking = build_region_comparison(frame, "index")
+    assert round(normalized.loc[pd.Timestamp("2024-02-01"), "지역A"], 6) == 110.0
+    assert ranking.iloc[0]["지역"] == "지역A"
+    assert round(ranking.iloc[0]["누적 상승률 (%)"], 6) == 10.0
