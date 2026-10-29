@@ -33,6 +33,7 @@ from features.feature13_real_estate_vs_stock.monte_carlo import historical_price
 from features.feature13_real_estate_vs_stock.simulation import simulate_monthly_comparison
 from features.feature13_real_estate_vs_stock import page as feature13_real_estate
 from features.feature14_fear_greed import page as feature14_fear_greed
+from features.feature15_reb_statistics import page as feature15_reb_statistics
 from common.metrics import sharpe_ratio, sortino_ratio, calmar_ratio, cashflow_xirr
 from common.metrics import performance_summary, mdd_recovery_days
 from common.metric_ui import render_metric_table, metric_help
@@ -60,6 +61,7 @@ FEATURES = [
     {"id":"laoer_infinite","icon":"♾️","title":"12. 라오어 무한매수법 백테스트","description":"V2.2 분할매수·LOC·부분매도 규칙을 과거 데이터로 검증합니다."},
     {"id":"real_estate_vs_stock","icon":"🏠","title":"13. 부동산 vs 주식 투자","description":"주택 매수와 월세·주식 적립 시나리오를 비교합니다."},
     {"id":"fear_greed_rebalance","icon":"😨","title":"14. 공포·탐욕 지수 리밸런싱","description":"시장 심리 지표가 기준값에 도달할 때 포트폴리오를 재조정합니다."},
+    {"id":"reb_statistics","icon":"🏘️","title":"15. 한국부동산원 부동산 통계","description":"R-ONE 공식 자료로 주택가격과 부동산 통계 흐름을 분석합니다."},
 ]
 
 
@@ -1243,6 +1245,7 @@ def render_feature_page() -> None:
                 "laoer_infinite": "f10_conditions",
                 "real_estate_vs_stock": "real_estate_conditions",
                 "fear_greed_rebalance": "fear_greed_home",
+                "reb_statistics": "reb_statistics_conditions",
             }
             if feature["id"] == "dynamic_portfolio":
                 # Re-entering this feature from the main menu must start on
@@ -2475,6 +2478,8 @@ with page_slot:
         feature13_real_estate.render(page, render_real_estate_conditions, render_real_estate_results)
     elif page.startswith("fear_greed"):
         feature14_fear_greed.render(page)
+    elif page.startswith("reb_statistics_"):
+        feature15_reb_statistics.render(page)
     else:
         st.session_state["current_page"] = "feature"
         st.rerun()
@@ -2497,6 +2502,8 @@ CONDITION_PAGES_WITHOUT_GLOBAL_NAV = {
     "fear_greed_overview",
     "fear_greed_compare",
     "fear_greed_results",
+    "reb_statistics_conditions",
+    "reb_statistics_results",
 }
 
 if page != "feature" and page not in CONDITION_PAGES_WITHOUT_GLOBAL_NAV:
